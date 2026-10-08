@@ -1,24 +1,27 @@
-# pip
+# esp32-dot
 
-A small native Rust firmware for pip's physical interface on the Waveshare
-ESP32-S3-Touch-AMOLED-1.8. ESP-IDF provides FreeRTOS and hardware drivers;
-LVGL draws the controls. The initial hello-world has evolved into the Figma v1 companion faces and
+Native Rust firmware for Dot's physical interface, using ESP-IDF and LVGL.
+Currently targets the Waveshare ESP32-S3-Touch-AMOLED-1.8.
+ESP-IDF provides FreeRTOS and hardware drivers; LVGL draws the controls.
+The initial hello-world has evolved into the Figma v1 companion faces and
 paginated messages in Inter Variable. See the v1 section below for behavior.
 
-This is a local display and card prototype. A host bridge pushes notices and decisions to pip and receives replies over
+This is a local display and card prototype. A host bridge pushes notices and decisions to Dot and receives replies over
 Wi-Fi/TCP at `<MAC_HOSTNAME>.local:8787`. USB remains available for flashing and captures.
 The bridge now exposes MCP tools and signed reply events for ChatGPT Dot. Local
 MCP and hardware round trips are tested; cloud connection requires the account's
 Secure MCP Tunnel and plugin setup below. No ChatGPT credentials go on the device.
 
+esp32-dot was designed by rsms and built in collaboration with ChatGPT.
+
 ## Five directions
 
-1. **Desk companion.** Pip lives as a responsive dot. A tap reveals a short
+1. **Desk companion.** Dot lives as a responsive dot. A tap reveals a short
    status; a second tap opens the relevant detail on the Mac. Start with a
    USB bridge and explicit idle/working/needs-attention states.
 2. **Focus companion.** One intention and a timer ring. Tap to start/pause;
-   pip quietly marks completion. The timer can work entirely on-device.
-3. **Pocket inbox.** One short card at a time from pip. Swipe to acknowledge,
+   Dot quietly marks completion. The timer can work entirely on-device.
+3. **Pocket inbox.** One short card at a time from Dot. Swipe to acknowledge,
    defer, or open on the Mac. Cache a small bounded inbox for offline use.
 4. **Voice pebble.** Hold to speak, release to send. The dot becomes a listening
    animation, then a short caption and spoken response. Requires audio bring-up
@@ -232,7 +235,7 @@ time periodically so they cannot starve the idle task/watchdog.
 
 ## Host bridge and semantic cards
 
-The host owns the queue, context and actions. Pip displays one card at a time
+The host owns the queue, context and actions. Dot displays one card at a time
 and returns stable card/option IDs. It never executes an email action itself.
 
 ```sh
@@ -270,7 +273,7 @@ Example request body for `POST /cards`:
 {
     "id": "example-decision-1",
     "kind": "decision",
-    "title": "A question from pip",
+    "title": "A question from Dot",
     "body": "This is a test. Which option should I use?",
     "options": [
         {"id": "first", "label": "First option"},
@@ -412,7 +415,7 @@ curl --fail http://127.0.0.1:8788/state \
 # Show a paginated message (omit title to avoid an extra paragraph).
 curl --fail http://127.0.0.1:8788/cards \
     -H 'Content-Type: application/json' \
-    -d '{"kind":"notice","body":"A message from pip."}'
+    -d '{"kind":"notice","body":"A message from Dot."}'
 
 # Hardware smoke test: requires TCP connected and an empty queue.
 .tools/python/bin/python scripts/ui-smoke.py
@@ -487,7 +490,7 @@ firmware is required for cancellation (an older build ignores `sync`).
 The MCP Events catalog advertises `device.reply`. Subscribe before sending a
 question, optionally filtering by `request_id`. Its data contains `request_id`,
 `kind`, `option_id`, and `option_label`. Notice dismissal is acknowledgement,
-not approval. The skill tells pip to recover the request and original task
+not approval. The skill tells Dot to recover the request and original task
 context before acting. Events contain data, not new instructions.
 
 The server implements `server/discover`, `events/list`, `events/subscribe`, and
