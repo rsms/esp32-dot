@@ -21,6 +21,12 @@ struct Card {
     title: String,
     body: String,
     options: Vec<OptionItem>,
+    #[serde(default = "notice_kind")]
+    kind: String,
+}
+
+fn notice_kind() -> String {
+    "notice".into()
 }
 
 fn display_text(text: &str, limit: usize) -> bool {
@@ -32,12 +38,13 @@ fn display_text(text: &str, limit: usize) -> bool {
 impl Card {
     fn valid(&self) -> bool {
         display_text(&self.id, 64)
-            && display_text(&self.title, 60)
+            && (self.title.is_empty() || display_text(&self.title, 60))
+            && ["notice", "error", "decision"].contains(&self.kind.as_str())
             && display_text(&self.body, 600)
             && (1..=3).contains(&self.options.len())
             && self.options.iter().enumerate().all(|(i, o)| {
                 display_text(&o.id, 48)
-                    && display_text(&o.label, 24)
+                    && display_text(&o.label, 64)
                     && !self.options[..i].iter().any(|previous| previous.id == o.id)
             })
     }
@@ -60,6 +67,11 @@ impl Card {
                 body.as_ptr(),
                 pointers.as_ptr(),
                 pointers.len() as u32,
+                match self.kind.as_str() {
+                    "decision" => 1,
+                    "error" => 2,
+                    _ => 0,
+                },
             )
         };
         if result == 0 {
@@ -70,9 +82,9 @@ impl Card {
     }
 }
 
-fn status(text: &str) {
-    if let Ok(text) = CString::new(text) {
-        unsafe { esp_idf_sys::pip_ui_status(text.as_ptr()) };
+fn state(name: &str) {
+    if let Ok(name) = CString::new(name) {
+        unsafe { esp_idf_sys::pip_ui_state(name.as_ptr()) };
     }
 }
 
@@ -88,6 +100,46 @@ impl App {
             return;
         };
         match message["type"].as_str() {
+            Some("sync") => {
+                if self
+                    .card
+                    .as_ref()
+                    .is_some_and(|card| message["card_id"].as_str() != Some(card.id.as_str()))
+                {
+                    self.pending = None;
+                    self.card = None;
+                    state("idle");
+                }
+            }
+            Some("state") if self.card.is_none() => {
+                if let Some(name) = message["state"].as_str() {
+                    state(name);
+                }
+            }
+            Some("inspect") => unsafe { esp_idf_sys::pip_ui_inspect() },
+            Some("tap") => {
+                if let (Some(x), Some(y)) = (message["x"].as_i64(), message["y"].as_i64()) {
+                    if (0..448).contains(&x) && (0..368).contains(&y) {
+                        unsafe { esp_idf_sys::pip_ui_tap(x as i32, y as i32) };
+                    }
+                }
+            }
+            Some("drag") => {
+                if let (Some(x0), Some(y0), Some(x1), Some(y1)) = (
+                    message["x0"].as_i64(),
+                    message["y0"].as_i64(),
+                    message["x1"].as_i64(),
+                    message["y1"].as_i64(),
+                ) {
+                    if [x0, x1].iter().all(|x| (0..448).contains(x))
+                        && [y0, y1].iter().all(|y| (0..368).contains(y))
+                    {
+                        unsafe {
+                            esp_idf_sys::pip_ui_drag(x0 as i32, y0 as i32, x1 as i32, y1 as i32)
+                        };
+                    }
+                }
+            }
             Some("set_host") => {
                 let result = network::set_host(&message);
                 println!(
@@ -123,7 +175,8 @@ impl App {
                         && reply["option_id"] == message["option_id"]
                 }) {
                     self.pending = None;
-                    status("Sent to pip");
+                    self.card = None;
+                    state("idle");
                 }
             }
             _ => {}
@@ -157,7 +210,7 @@ fn main() {
         pending: None,
         last_reply: Instant::now(),
     };
-    let mut taps = 0;
+    let mut interaction_seq = 0_u32;
     loop {
         thread::sleep(Duration::from_millis(25));
         unsafe { esp_idf_sys::pip_network_poll() };
@@ -177,7 +230,7 @@ fn main() {
                     app.pending =
                         Some(json!({"type":"choice", "card_id":card.id, "option_id":option.id}));
                     app.last_reply = Instant::now() - Duration::from_secs(5);
-                    status("Sending your choice...");
+                    state("thinking");
                 }
             }
         }
@@ -189,15 +242,14 @@ fn main() {
                 app.last_reply = Instant::now();
             }
         }
-        let next = unsafe { esp_idf_sys::pip_touch_count() };
-        if next != taps && app.card.is_none() {
-            taps = next;
-            unsafe {
-                esp_idf_sys::pip_ui_show(
-                    c"hello".as_ptr(),
-                    if taps % 2 == 0 { 0xf5f5f0 } else { 0xb6caff },
-                )
-            };
+        let interaction = unsafe { esp_idf_sys::pip_ui_interaction() };
+        if interaction != 0 {
+            interaction_seq += 1;
+            let event = json!({"type":"interaction", "action":if interaction == 1 {"listen_start"} else {"listen_stop"},
+                "id":format!("{}-{interaction_seq}", unsafe { esp_idf_sys::esp_timer_get_time() })});
+            let line = event.to_string();
+            println!("PIPEVENT {line}");
+            let _ = outgoing.try_send(line);
         }
     }
 }

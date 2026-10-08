@@ -26,17 +26,19 @@ def display_text(value, limit, name):
 
 def validate_card(data):
     kind = data.get("kind", "notice")
-    if kind not in ("notice", "decision"):
-        raise ValueError("kind must be notice or decision")
-    options = data.get("options", [{"id": "dismiss", "label": "Dismiss"}] if kind == "notice" else [])
+    if kind not in ("notice", "decision", "error"):
+        raise ValueError("kind must be notice, decision, or error")
+    options = data.get("options", [{"id": "dismiss", "label": "Dismiss"}] if kind != "decision" else [])
     if not isinstance(options, list) or not 1 <= len(options) <= 3:
         raise ValueError("Provide between one and three options")
+    if kind != "decision" and options != [{"id": "dismiss", "label": "Dismiss"}]:
+        raise ValueError("Notices and errors use the dismissal control; use decision for options")
     options = [{"id": display_text(o.get("id"), 48, "option id"),
-        "label": display_text(o.get("label"), 24, "option label")} for o in options]
+        "label": display_text(o.get("label"), 64, "option label")} for o in options]
     if len({o["id"] for o in options}) != len(options):
         raise ValueError("Option IDs must be unique")
     return {"type": "card", "id": display_text(data.get("id", str(uuid.uuid4())), 64, "id"),
-        "kind": kind, "title": display_text(data.get("title"), 60, "title"),
+        "kind": kind, "title": "" if data.get("title", "") == "" else display_text(data.get("title"), 60, "title"),
         "body": display_text(data.get("body"), 600, "body"), "options": options}
 
 
@@ -45,8 +47,11 @@ def private_json(path, value):
     temporary = path.with_suffix(".tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as output:
+        os.fchmod(output.fileno(), 0o600)
         json.dump(value, output, indent=2)
         output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
     temporary.replace(path)
 
 
@@ -67,17 +72,56 @@ class Bridge:
         if self.peer and card:
             await self.peer.send(card["message"])
 
+    async def synchronize(self):
+        if self.peer:
+            card = self.current()
+            await self.peer.send({"type": "sync", "card_id": card["message"]["id"] if card else None})
+            await self.deliver()
+
+    def health(self):
+        return {"device": "pip", "connected": self.peer is not None,
+            "transport": "usb" if isinstance(self.peer, UsbPeer) else "tcp" if self.peer else None,
+            "pending": sum(c["status"] == "pending" for c in self.state["cards"])}
+
+    def get(self, request_id):
+        card = next((c for c in self.state["cards"] if c["message"]["id"] == request_id), None)
+        if card is None:
+            raise ValueError("Unknown request ID")
+        return card
+
+    async def cancel(self, request_id):
+        card = self.get(request_id)
+        if card["status"] == "pending":
+            card.update(status="cancelled", cancelled_at=time.time())
+            self.save()
+            try:
+                await self.synchronize()
+            except ConnectionError:
+                pass  # Reconnection synchronizes the screen with the persisted queue.
+        return card
+
     async def add(self, data):
         card = validate_card(data)
+        importance = data.get("importance", "normal")
+        if importance not in ("normal", "urgent"):
+            raise ValueError("importance must be normal or urgent")
         existing = next((c for c in self.state["cards"] if c["message"]["id"] == card["id"]), None)
         if existing:
-            if existing["message"] != card:
+            if existing["message"] != card or existing.get("importance", "normal") != importance:
                 raise ValueError("This card ID already has different content")
             return existing
-        record = {"message": card, "status": "pending", "created_at": time.time()}
-        self.state["cards"].append(record)
+        record = {"message": card, "status": "pending", "created_at": time.time(), "importance": importance}
+        # Urgent requests advance ahead of waiting normal requests, never the current card.
+        current = self.current()
+        index = next((i for i, c in enumerate(self.state["cards"])
+            if importance == "urgent" and c is not current and c["status"] == "pending"
+            and c.get("importance", "normal") == "normal"), len(self.state["cards"]))
+        self.state["cards"].insert(index, record)
         self.save()
-        await self.deliver()
+        try:
+            await self.deliver()
+        except ConnectionError:
+            pass  # Accepted and persisted even if this connection disappeared.
         return record
 
     async def receive(self, peer, message):
@@ -86,10 +130,20 @@ class Bridge:
         kind = message.get("type")
         if kind == "ping":
             await peer.send({"type": "pong"})
+        elif kind == "interaction" and message.get("action") in ("listen_start", "listen_stop"):
+            event_id = display_text(message.get("id"), 64, "interaction id")
+            if not any(e.get("id") == event_id for e in self.state["events"]):
+                self.state["events"].append({"seq": len(self.state["events"]) + 1,
+                    "type": "interaction", "id": event_id, "action": message["action"],
+                    "timestamp": time.time()})
+                self.save()
         elif kind == "choice":
             card = next((c for c in self.state["cards"] if c["message"]["id"] == message.get("card_id")), None)
             if not card or message.get("option_id") not in {o["id"] for o in card["message"]["options"]}:
                 await peer.send({"type": "error", "message": "Unknown card or option"})
+                return
+            if card["status"] == "cancelled":
+                await self.synchronize()
                 return
             if card["status"] == "pending":
                 if card is not self.current():
@@ -108,7 +162,7 @@ class Bridge:
         if self.peer:
             await self.peer.close()
         self.peer = peer
-        await self.deliver()
+        await self.synchronize()
 
     async def tcp_client(self, reader, writer):
         peer = TcpPeer(writer)
@@ -146,9 +200,17 @@ class Bridge:
             data = await asyncio.wait_for(reader.readexactly(size), 5)
             url = urlsplit(target)
             if method == "GET" and url.path == "/health":
-                result = {"device": "pip", "connected": self.peer is not None,
-                    "transport": "usb" if isinstance(self.peer, UsbPeer) else "tcp" if self.peer else None,
-                    "pending": sum(c["status"] == "pending" for c in self.state["cards"])}
+                result = self.health()
+            elif method == "POST" and url.path == "/state":
+                state = json.loads(data).get("state")
+                if state not in ("sleeping", "idle", "listening", "thinking", "attention"):
+                    raise ValueError("Unknown display state")
+                if self.current():
+                    raise ValueError("Dismiss pending cards before changing the companion state")
+                if not self.peer:
+                    raise ConnectionError("Device disconnected")
+                await self.peer.send({"type": "state", "state": state})
+                result = {"state": state, "sent": True}
             elif method == "POST" and url.path == "/cards":
                 result = await self.add(json.loads(data))
             elif method == "GET" and url.path == "/cards":
@@ -267,10 +329,13 @@ async def serve(args):
     if not config_path.exists():
         private_json(config_path, {"token": secrets.token_hex(32)})
     bridge = Bridge(json.loads(config_path.read_text())["token"], ROOT / ".tools/bridge-state.json")
+    from pip_mcp import MCP, load_mcp_token
+    mcp = MCP(bridge, load_mcp_token())
     tcp = await asyncio.start_server(bridge.tcp_client, args.bind, args.tcp_port, limit=MAX_MESSAGE)
     http = await asyncio.start_server(bridge.http_client, "127.0.0.1", args.http_port, limit=8192)
-    print(f"Pip API: http://127.0.0.1:{args.http_port}; device TCP: {args.bind}:{args.tcp_port}", flush=True)
-    tasks = [tcp.serve_forever(), http.serve_forever()]
+    rpc = await asyncio.start_server(mcp.http_client, "127.0.0.1", args.mcp_port, limit=16384)
+    print(f"Pip API: http://127.0.0.1:{args.http_port}; MCP: http://127.0.0.1:{args.mcp_port}/mcp; device TCP: {args.bind}:{args.tcp_port}", flush=True)
+    tasks = [tcp.serve_forever(), http.serve_forever(), rpc.serve_forever(), mcp.deliver_events()]
     if args.serial:
         from serial.tools import list_ports
         ports = [p.device for p in list_ports.comports() if p.vid == 0x303a and p.pid == 0x1001]
@@ -278,7 +343,7 @@ async def serve(args):
         if not port:
             raise ValueError("Expected one USB device; specify --serial /dev/cu.usbmodem…")
         tasks.append(UsbPeer(port).run(bridge))
-    async with tcp, http:
+    async with tcp, http, rpc:
         await asyncio.gather(*tasks)
 
 
@@ -287,6 +352,7 @@ if __name__ == "__main__":
     parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument("--tcp-port", type=int, default=8787)
     parser.add_argument("--http-port", type=int, default=8788)
+    parser.add_argument("--mcp-port", type=int, default=8789)
     parser.add_argument("--serial", help="Optional USB transport: auto or a serial port")
     try:
         asyncio.run(serve(parser.parse_args()))

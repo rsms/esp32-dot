@@ -7,6 +7,6 @@ mkdir -p .tools
 cargo +stable install ldproxy --version 0.3.5 --root .tools --locked
 uv venv --python 3.11 .tools/python
 UV_CACHE_DIR="$PIP_ROOT/.tools/uv-cache" uv pip install --python .tools/python/bin/python \
-    esptool==5.5.0 fonttools==4.66.1
-npm install --prefix .tools/font-converter --save-exact lv_font_conv@1.5.3
+    esptool==5.5.0 fonttools==4.66.1 pillow==12.3.0
+npm install --prefix .tools/font-converter --save-exact lv_font_conv@1.5.3 @resvg/resvg-js@2.6.2
 

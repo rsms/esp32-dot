@@ -13,6 +13,7 @@
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
+#include "esp_lcd_panel_io.h"
 #include "esp_lvgl_port.h"
 #include "esp_psram.h"
 #include "esp_timer.h"
@@ -22,17 +23,13 @@
 #include "lvgl.h"
 
 static const char *TAG = "pip";
-static lv_obj_t *circle;
-static lv_obj_t *label;
-static atomic_uint taps;
 static lv_display_t *ui_display;
+static esp_lcd_panel_io_handle_t panel_io;
 static uint16_t *screen_pixels;
 static uint32_t screen_flushes;
 static lv_obj_t *choice_buttons[3];
-static lv_obj_t *card_status;
 static atomic_uint choice;
 enum { UI_WIDTH = BSP_LCD_V_RES, UI_HEIGHT = BSP_LCD_H_RES };
-LV_FONT_DECLARE(inter_40);
 LV_FONT_DECLARE(inter_28);
 LV_FONT_DECLARE(inter_20);
 
@@ -60,10 +57,43 @@ static void round_area(lv_event_t *event)
     area->y2 |= 1;
 }
 
-static void tapped(lv_event_t *event)
+// Waveshare's V2 Arduino reference programs panel controls AFTER sleep-out.
+// The BSP instead programs them while asleep; replay the reference order.
+static esp_err_t panel_wake(void)
 {
-    (void)event;
-    atomic_fetch_add_explicit(&taps, 1, memory_order_relaxed);
+    // The V2 reference also requires 200 ms after software reset (BSP: 80 ms).
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(panel_io, 0x02000100, NULL, 0), TAG, "panel software reset");
+    vTaskDelay(pdMS_TO_TICKS(200));
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(panel_io, 0x02001100, NULL, 0), TAG, "panel sleep out");
+    vTaskDelay(pdMS_TO_TICKS(120));
+    const uint8_t settings[][2] = {
+        {0xfe, 0x00}, {0xc4, 0x80}, {0x3a, 0x55}, {0x53, 0x20}, {0x63, 0xff},
+    };
+    for (unsigned i = 0; i < sizeof(settings) / sizeof(settings[0]); i++) {
+        ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(panel_io,
+            0x02000000 | (settings[i][0] << 8), &settings[i][1], 1), TAG, "panel control");
+    }
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(panel_io, 0x02002900, NULL, 0), TAG, "panel display on");
+    const uint8_t brightness = 255; // 100 percent.
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(panel_io, 0x02005100, &brightness, 1), TAG, "panel brightness");
+    const uint8_t contrast = 0;
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(panel_io, 0x02005800, &contrast, 1), TAG, "panel contrast");
+    vTaskDelay(pdMS_TO_TICKS(10));
+    return ESP_OK;
+}
+
+static void panel_report(void)
+{
+    if (!lvgl_port_lock(1000)) return;
+    const uint8_t registers[] = {0x04, 0x0a, 0x0b, 0x0c, 0x52, 0x54};
+    for (unsigned i = 0; i < sizeof(registers); i++) {
+        uint8_t data[4] = {0};
+        esp_err_t result = esp_lcd_panel_io_rx_param(panel_io,
+            0x03000000 | (registers[i] << 8), data, sizeof(data));
+        printf("PIPPANEL %02x result=%ld raw=%02x%02x%02x%02x\n", registers[i],
+            (long)result, data[0], data[1], data[2], data[3]);
+    }
+    lvgl_port_unlock();
 }
 
 int32_t pip_board_init(void)
@@ -78,16 +108,19 @@ int32_t pip_board_init(void)
     esp_lcd_panel_io_handle_t io = NULL;
     const bsp_display_config_t panel_config = {0};
     ESP_RETURN_ON_ERROR(bsp_display_new(&panel_config, &panel, &io), TAG, "panel initialization");
-    // The BSP waits only 100 ms after sleep-out and none after display-on.
-    // Complete the panel's settling interval before starting asynchronous draws.
-    vTaskDelay(pdMS_TO_TICKS(30));
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), TAG, "display on after sleep-out");
-    vTaskDelay(pdMS_TO_TICKS(10));
+    panel_io = io;
+    if (i2c_master_probe(bsp_i2c_get_handle(), 0x15, 100) == ESP_OK) {
+        ESP_RETURN_ON_ERROR(panel_wake(), TAG, "V2 panel wake sequence");
+    } else {
+        vTaskDelay(pdMS_TO_TICKS(30));
+        ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), TAG, "display on");
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
     // Software rotation skips the port's normal panel orientation setup.
     // Explicitly restore native addressing after the panel has woken up.
     ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(panel, false), TAG, "native panel axes");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(panel, false, false), TAG, "native panel orientation");
-    ESP_RETURN_ON_ERROR(bsp_display_brightness_set(35), TAG, "brightness");
+    ESP_RETURN_ON_ERROR(bsp_display_brightness_set(100), TAG, "brightness");
 
     lvgl_port_cfg_t port_config = ESP_LVGL_PORT_INIT_CONFIG();
     port_config.task_stack = 6144;
@@ -131,22 +164,7 @@ int32_t pip_board_init(void)
     lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 
-    circle = lv_obj_create(screen);
-    lv_obj_remove_style_all(circle);
-    lv_obj_set_size(circle, 120, 120);
-    lv_obj_align(circle, LV_ALIGN_CENTER, 0, -34);
-    lv_obj_set_style_radius(circle, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_opa(circle, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(circle, lv_color_hex(0xf5f5f0), 0);
-    lv_obj_add_flag(circle, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_remove_flag(circle, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(circle, tapped, LV_EVENT_CLICKED, NULL);
-
-    label = lv_label_create(screen);
-    lv_obj_set_style_text_font(label, &inter_40, 0);
-    lv_obj_set_style_text_color(label, lv_color_hex(0xf5f5f0), 0);
-    lv_label_set_text(label, "hello");
-    lv_obj_align_to(label, circle, LV_ALIGN_OUT_BOTTOM_MID, 0, 32);
+    pip_ui_init(display);
     ESP_LOGI(TAG, "UI=%ldx%ld; landscape, software rotation",
         (long)lv_display_get_horizontal_resolution(display),
         (long)lv_display_get_vertical_resolution(display));
@@ -230,6 +248,8 @@ const char *pip_debug_poll(void)
             command[length] = '\0';
             if (!overflow && strcmp(command, "screenshot") == 0) {
                 send_screenshot();
+            } else if (!overflow && strcmp(command, "panel") == 0) {
+                panel_report();
             } else if (!overflow && length != 0) {
                 length = 0;
                 return command;
@@ -259,7 +279,7 @@ static void option_clicked(lv_event_t *event)
     }
 }
 
-int32_t pip_ui_card(const char *title, const char *body, const char *const *options, uint32_t count)
+int32_t pip_legacy_card(const char *title, const char *body, const char *const *options, uint32_t count)
 {
     if (!title || !body || !options || count < 1 || count > 3) {
         return ESP_ERR_INVALID_ARG;
@@ -269,7 +289,6 @@ int32_t pip_ui_card(const char *title, const char *body, const char *const *opti
     }
     lv_obj_t *screen = lv_display_get_screen_active(ui_display);
     lv_obj_clean(screen);
-    circle = label = card_status = NULL;
     memset(choice_buttons, 0, sizeof(choice_buttons));
     atomic_store(&choice, 0);
 
@@ -317,53 +336,9 @@ int32_t pip_ui_card(const char *title, const char *body, const char *const *opti
     return ESP_OK;
 }
 
-uint32_t pip_ui_choice(void)
+uint32_t pip_legacy_choice(void)
 {
     return atomic_exchange(&choice, 0);
-}
-
-int32_t pip_ui_status(const char *text)
-{
-    if (!text || !lvgl_port_lock(1000)) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    for (unsigned i = 0; i < 3; i++) {
-        if (choice_buttons[i]) {
-            lv_obj_delete(choice_buttons[i]);
-            choice_buttons[i] = NULL;
-        }
-    }
-    if (!card_status) {
-        card_status = lv_label_create(lv_display_get_screen_active(ui_display));
-        lv_obj_set_style_text_font(card_status, &inter_20, 0);
-        lv_obj_set_style_text_color(card_status, lv_color_hex(0xb6caff), 0);
-        lv_obj_set_style_text_align(card_status, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_size(card_status, UI_WIDTH - 48, 60);
-        lv_obj_set_pos(card_status, 24, UI_HEIGHT - 76);
-    }
-    lv_label_set_text(card_status, text);
-    lvgl_port_unlock();
-    return ESP_OK;
-}
-
-int32_t pip_ui_show(const char *text, uint32_t circle_rgb)
-{
-    if (!text || !circle || !label) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (!lvgl_port_lock(1000)) {
-        return ESP_ERR_TIMEOUT;
-    }
-    lv_label_set_text(label, text);
-    lv_obj_set_style_bg_color(circle, lv_color_hex(circle_rgb), 0);
-    lv_obj_align_to(label, circle, LV_ALIGN_OUT_BOTTOM_MID, 0, 32);
-    lvgl_port_unlock();
-    return ESP_OK;
-}
-
-uint32_t pip_touch_count(void)
-{
-    return atomic_load_explicit(&taps, memory_order_relaxed);
 }
 
 void pip_print_diagnostics(void)

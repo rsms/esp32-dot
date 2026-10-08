@@ -75,7 +75,12 @@ def main():
             parser.error("Expected one release build; clean stale build outputs and rebuild")
         bootloader = builds[0]
         build = bootloader.parent.parent
-        partition = build / "partition_table/partition-table.bin"
+        # esp-idf-sys builds its own temporary CMake project. Generate the real
+        # device table here, as recommended for Rust custom partitions.
+        partition = ROOT / ".tools/partitions.bin"
+        generator = ROOT / ".embuild/espressif/esp-idf/v5.5.5/components/partition_table/gen_esp32part.py"
+        subprocess.run([sys.executable, str(generator), str(ROOT / "partitions.csv"),
+            str(partition)], check=True)
         settings = json.loads((build / "flasher_args.json").read_text())["flash_settings"]
         firmware = release / "pip-firmware.bin"
         flash_flags = ["--flash-mode", settings["flash_mode"],

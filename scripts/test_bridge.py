@@ -31,7 +31,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         return reader, writer
 
     async def message(self, reader):
-        return json.loads(await asyncio.wait_for(reader.readline(), 1))
+        while True:
+            message = json.loads(await asyncio.wait_for(reader.readline(), 1))
+            if message["type"] != "sync":
+                return message
 
     async def test_queue_reconnect_and_exactly_one_choice_event(self):
         card = {"id": "test", "kind": "decision", "title": "Choose", "body": "Pick one",
@@ -67,8 +70,22 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.bridge.add(dict(card, title="Changed"))
 
+    async def test_interaction_events_and_error_cards(self):
+        reader, writer = await self.connect()
+        await self.message(reader)
+        event = b'{"type":"interaction","id":"sample-1","action":"listen_start"}\n'
+        writer.write(event + event + b'{"type":"ping"}\n')
+        await writer.drain()
+        self.assertEqual((await self.message(reader))["type"], "pong")
+        self.assertEqual(len(self.bridge.state["events"]), 1)
+        self.assertEqual(self.bridge.state["events"][0]["action"], "listen_start")
+        card = await self.bridge.add({"id":"error", "kind":"error", "body":"Error: retry later"})
+        self.assertEqual(card["message"]["title"], "")
+        self.assertEqual((await self.message(reader))["kind"], "error")
+        self.assertEqual(card["message"]["options"], [{"id":"dismiss", "label":"Dismiss"}])
+
     def test_validates_display_limits(self):
-        for card in ({"title": "", "body": "x"}, {"title": "x", "body": "snowman ☃"},
+        for card in ({"title": "x" * 61, "body": "x"}, {"title": "x", "body": "snowman ☃"},
             {"kind": "decision", "title": "x", "body": "x", "options": []}):
             with self.subTest(card=card), self.assertRaises(ValueError):
                 validate_card(card)

@@ -2,13 +2,14 @@
 
 A small native Rust firmware for pip's physical interface on the Waveshare
 ESP32-S3-Touch-AMOLED-1.8. ESP-IDF provides FreeRTOS and hardware drivers;
-LVGL draws the controls. The first screen is an antialiased circle and `hello`
-in Inter Variable. Tap the circle to alternate between warm white and pale blue.
+LVGL draws the controls. The initial hello-world has evolved into the Figma v1 companion faces and
+paginated messages in Inter Variable. See the v1 section below for behavior.
 
-This is a local display and card prototype. A host bridge can push notices and
-decisions to pip, and receive button choices. It works over USB now and includes
-an outbound Wi-Fi/TCP client. Connecting the actual ChatGPT Dot to the bridge's
-local API remains future work; no ChatGPT credentials are used by this firmware.
+This is a local display and card prototype. A host bridge pushes notices and decisions to pip and receives replies over
+Wi-Fi/TCP at `<MAC_HOSTNAME>.local:8787`. USB remains available for flashing and captures.
+The bridge now exposes MCP tools and signed reply events for ChatGPT Dot. Local
+MCP and hardware round trips are tested; cloud connection requires the account's
+Secure MCP Tunnel and plugin setup below. No ChatGPT credentials go on the device.
 
 ## Five directions
 
@@ -26,8 +27,8 @@ local API remains future work; no ChatGPT credentials are used by this firmware.
    useful prompt when picked up. The IMU provides the gesture, the RTC the clock;
    synchronized content would come from the host.
 
-The bridge/API for the actual Dot has not been established. These are proposed
-interaction designs, not claims that an existing Dot API exposes these actions.
+These are interaction directions. The implemented interface and integration
+status are described below; microphone audio remains future work.
 
 ## Hardware and constraints
 
@@ -67,7 +68,8 @@ There is no desktop GPU. One RGB565 frame is 329,728 bytes (322 KiB).
 Our two native-width 32-row DMA buffers total 47,104 bytes (46 KiB), allocated
 internally. Software rotation adds one 23,552-byte scratch buffer, for 69 KiB
 total pixel buffers. LVGL redraws dirty rectangles. Updates must start on even coordinates and cover
-even pixel counts. AMOLED brightness is a panel command, not a PWM backlight.
+even pixel counts. AMOLED brightness is a panel command, not a PWM backlight. Startup brightness
+is 100% (requested by the user).
 The USB pins must remain available for flashing and recovery.
 
 PSRAM has different access and bandwidth constraints from internal SRAM. Keep
@@ -92,15 +94,15 @@ LVGL's input processing automatically applies the inverse display transform.
 Do not rotate touch a second time in the driver. Center controls using LVGL
 alignment rather than hard-coded portrait coordinates.
 
-Allow 30 ms after BSP panel initialization before starting LVGL. BSP 2.0.3's
-sleep-out delay is only 100 ms, with no display-on settling delay. The vendor's
-Arduino CO5300 reference allows 120 ms for sleep-out and 10 ms after its init
-sequence. Startup is still being investigated: this extra delay alone did not
-eliminate intermittent blank screens after USB resets. The current firmware
-therefore reissues display-on **after** the 30 ms allowance and waits another
-10 ms before drawing. Subsequent camera checks and the user's physical check
-confirmed an upright, working display and touch. Genuine cold power-on still
-needs testing.
+The V2 panel needs the complete Waveshare Arduino reset sequence. After BSP
+creation, reset it again, wait **200 ms**, send sleep-out, wait **120 ms**, then
+program its controls/pixel format, display-on and brightness, and wait 10 ms.
+The BSP/driver's 80 ms reset delay and programming-before-wake ordering produced
+blank physical screens despite correct LVGL captures. The earlier 30 ms delay
+and repeated display-on were insufficient. Replaying the V2 reference sequence
+restored the physical display, confirmed by the user and a background camera
+capture. Genuine cold power-on still needs testing. The override applies only
+to the probed V2 board; the existing V1 startup remains separate.
 
 For physical visual verification, the user provides a live camera preview in
 QuickTime Player. Capture that window rather than treating a framebuffer dump
@@ -112,12 +114,13 @@ with `--list-windows --app 'QuickTime Player'`, then capture using only
 
 ## Build layout
 
-- `src/main.rs`: Rust app, greeting, semantic cards and acknowledged choices.
+- `src/main.rs`: Rust app, semantic cards, state commands and acknowledged choices.
 - `src/network.rs`: bounded JSON-lines TCP client, reconnects and heartbeats.
 - `components/pip_board/`: C17 hardware/LVGL bridge, screenshot and Wi-Fi setup.
 - `assets/fonts/InterVariable.ttf`: original variable font, supplied by its author.
 - `components/pip_board/inter_*.c`: generated ASCII glyphs, 20/28/40 px, weight 450,
-  optical size 32, 4-bit coverage. Font axes are instantiated at build time;
+  optical size 32, 4-bit coverage. The v1 message font adds 55 px at weight 500,
+  optical size 27.5, plus a separate 88 px checkmark glyph. Font axes are instantiated at build time;
   this initial renderer does not vary font weight at runtime.
 - `sdkconfig.defaults`: 16 MiB flash, octal PSRAM, USB console, 240 MHz CPU.
 
@@ -140,8 +143,8 @@ sh scripts/font.sh
 
 The device script selects the sole Espressif 303a:1001 USB device, or accepts
 `--port /dev/cu.usbmodem…` when multiple devices are connected. Monitoring is
-bounded and closes the port when finished. Flashing checks the generated
-application against the actual factory partition size before writing. USB
+bounded and closes the port when finished. Flashing generates the custom table from `partitions.csv` and checks the
+application against its factory partition size before writing. USB
 monitoring and screenshots suppress PySerial's DTR/RTS writes on open, which
 otherwise reset the S3 on this Mac. Only `--reset` explicitly pulses reset.
 
@@ -180,15 +183,16 @@ the ROM starts in DIO, then the bootloader configures QIO.
 - Wi-Fi was provisioned through the local password prompt; `/health` confirmed
   a TCP connection, and a subsequent notice delivered over Wi-Fi appeared in
   the device screenshot.
-- Endpoint changed to `rmbm5.local:8787` without re-entering credentials; the
+- Endpoint changed to `<MAC_HOSTNAME>.local:8787` without re-entering credentials; the
   device reconnected after a bridge restart using its saved hostname.
-- After the final hostname firmware flash, direct captures still contain the
-  card and TCP remains healthy, but background camera captures show a dark
-  panel. A direct physical check is pending; do not treat a correct software
-  capture as proof that the panel is displaying it. Startup reliability remains
-  open until this discrepancy is resolved.
-- Seven host tests cover screenshot integrity/color conversion, TCP
-  authentication, reconnect/re-delivery, persistent choices and deduplication.
+- The earlier blank-panel discrepancy was confirmed physically. The v1 pass
+  fixed it using the vendor's complete V2 reset/wake ordering; both the user
+  and a later live camera capture confirmed visible, upright artwork.
+- Eight host tests cover screenshot integrity/color conversion, TCP
+  authentication, reconnect/re-delivery, persistent choices, interaction
+  deduplication and error-card validation. The hardware UI smoke test also
+  passes state changes, pagination, back navigation, queue advancement and
+  acknowledged dismissals.
 - The documented incremental build command also passed with `--locked`.
 
 Logs are local and ignored: `.tools/build.log`, `.tools/flash.log`, `.tools/boot.log`.
@@ -248,8 +252,8 @@ The bridge token and durable queue/event history live in ignored, private
 contain private content, so do not check these files into version control.
 
 The HTTP API is a local tool integration point. Browser origins are rejected;
-it is not a public website/API. No Dot connector or email integration has been
-configured. Dot needs an authorized local tool capable of calling this API.
+it is not a public website/API. Dot uses the MCP adapter described below;
+email access remains a separate Dot plugin connection.
 
 | Endpoint | Meaning |
 | --- | --- |
@@ -275,10 +279,10 @@ Example request body for `POST /cards`:
 }
 ```
 
-Notices default to a Dismiss button. Decisions require 1–3 options. Display
+Notices use a dismissal page. Decisions require 1–3 options. Display
 text currently supports printable ASCII and newlines: title up to 60 characters,
-body up to 600, option label up to 24. Long bodies scroll; long titles ellipsize.
-The first renderer uses Inter 28 for headings and Inter 20 for body/buttons.
+body up to 600, option label up to 64. Titles and bodies paginate together.
+Choices use the Figma renderer described below.
 
 On connection, the device sends `{"type":"hello","version":1,"device":"pip",
 "token":"..."}`. The server responds with `welcome`, then the pending card
@@ -297,11 +301,11 @@ terminal prompt to provision credentials over USB:
 
 ```sh
 .tools/python/bin/python scripts/device.py configure \
-    --host rmbm5.local --via-bridge
+    --host "<MAC_HOSTNAME>.local" --via-bridge
 ```
 
-Use the Mac's Bonjour hostname rather than its DHCP address. This Mac's
-`LocalHostName` is `rmbm5`; ESP-IDF's `CONFIG_LWIP_DNS_SUPPORT_MDNS_QUERIES=y`
+Use the Mac's Bonjour hostname rather than its DHCP address. Find it with
+`scutil --get LocalHostName`; ESP-IDF's `CONFIG_LWIP_DNS_SUPPORT_MDNS_QUERIES=y`
 makes standard hostname resolution query mDNS for `.local` names. The TCP client
 resolves the hostname on each reconnect. The command prompts for SSID
 and a hidden password; neither is passed on the shell command line. Credentials
@@ -314,7 +318,7 @@ Check `/health` for `"transport":"tcp"` to verify the actual connection.
 To change only the endpoint while retaining Wi-Fi credentials and the token:
 
 ```sh
-.tools/python/bin/python scripts/device.py set-host --host rmbm5.local
+.tools/python/bin/python scripts/device.py set-host --host "<MAC_HOSTNAME>.local"
 ```
 
 This command uses USB; stop the bridge's USB transport first if it still owns
@@ -345,3 +349,403 @@ Do not permanently disable USB Serial/JTAG or repurpose GPIO19/20.
 
 The new app is independent of Playbit; the archived document was used only as
 a board reference.
+
+## Figma v1 renderer (2026-10-08)
+
+The authoritative v1 is the flow in the user's 13:45 screenshot, with source
+frames listed in [assets/figma/README.md](assets/figma/README.md). Other areas
+of the Figma file are WIP, except the subsequently approved reply-choice flow
+`4:1568` supplied in the user's 15:37 screenshot.
+
+`components/pip_board/pip_ui.c` renders sleeping, idle, listening, thinking and
+attention faces using the original Figma vectors. Messages use Inter Medium
+55 px (2× the design), optical size 27.5, 64 px line spacing and cap-height-aligned positioning.
+The display is RGB565, so colors and antialias coverage are quantized.
+
+Messages wrap using LVGL's own font metrics into four-line pages. An optional
+`title` becomes the first paragraph; omit it for an uninterrupted message.
+Left/right 128 px strips navigate. The last text page advances to a checkmark
+screen; its center region dismisses. Message dots exclude the dismissal page,
+matching Figma. Long messages show a sliding window of up to nine dots.
+A new card shows attention for 900 ms (tap skips ahead). Dismissal retains the
+existing retry/ACK protocol; an acknowledged card advances the host queue or
+returns to idle. `kind: "error"` uses the same flow in #a44200.
+
+Decisions use the same text pages, followed by one white inset card per choice.
+The page row combines text-page dots with A/B/C markers. Tapping a choice opens
+a separate confirmation screen; only a tap inside its white circle submits.
+Horizontal swipes move between pages. On choice screens, taps in the blue
+left/right margins also navigate; on confirmation screens, the arrows navigate
+and cancel the tentative selection. Forward at the final choice stays on that
+choice, and back from choice A returns to the final text page. Vertical drags
+do not select or confirm. Labels use Inter Medium 55 px and are centered within
+the 400×256 card; unusually long labels shrink to fit rather than being clipped.
+Confirmation uses a 192 px circle, Inter SemiBold 22 px caption, and Bold 33 px
+choice markers. The device emits its existing durable choice reply only after
+confirmation, so the MCP/event protocol is unchanged.
+
+The reply-choice firmware was built, flashed with hash verification, and
+checked using CRC-verified device screenshots against the Figma reference.
+The hardware tests passed for 1/2/3 choices, backward and forward navigation,
+confirmation cancellation, and prevention of premature replies. The existing
+notice/error UI smoke test and all 18 host tests also passed. Hardware tests
+use simulated touch. The user also verified physical swipes, choice taps, and
+confirmation on the device.
+
+Known issue: the user observed visible tearing during screen redraws. Display
+transfer timing and panel synchronization still need investigation; the cause
+has not yet been confirmed.
+
+Tapping sleeping/idle shows listening and emits a `listen_start` interaction;
+tapping again emits `listen_stop` and returns to idle. **This pass does not
+record microphone audio.** The >2-second/volume gate in the design awaits
+codec/microphone bring-up. The host can set thinking when real processing
+starts. There is no invented idle-to-sleep timeout or animation timing.
+Interaction events are best-effort notifications; unlike card replies they
+are not retried. Their unique IDs let the host deduplicate received events.
+
+```sh
+# Show a companion state when the card queue is empty.
+curl --fail http://127.0.0.1:8788/state \
+    -H 'Content-Type: application/json' -d '{"state":"sleeping"}'
+
+# Show a paginated message (omit title to avoid an extra paragraph).
+curl --fail http://127.0.0.1:8788/cards \
+    -H 'Content-Type: application/json' \
+    -d '{"kind":"notice","body":"A message from pip."}'
+
+# Hardware smoke test: requires TCP connected and an empty queue.
+.tools/python/bin/python scripts/ui-smoke.py
+.tools/python/bin/python scripts/choices-smoke.py
+```
+
+The hardware test generates and dismisses its own notice/error cards, checks
+page boundaries and back navigation, verifies host replies, and saves CRC-
+validated screen captures under `.tools/v1/`. The choice test covers 1–3
+options, swipe boundaries, tentative-selection cancellation, and exactly one
+reply after confirmation, with captures under `.tools/choices/`.
+USB JSON commands `inspect`, `tap`, and `drag` expose UI state and invoke the
+same navigation handler as physical touch. A drag has `x0`, `y0`, `x1`, `y1`;
+they are development tools, not evidence that the touch hardware was tapped.
+
+The v1 artwork exceeds the original app partition. `partitions.csv` gives the
+factory app 4 MiB at 0x10000 and keeps NVS/PHY addresses unchanged. The flashing
+script generates and validates that real table; esp-idf-sys uses its temporary
+project's default table during the intermediate build. LVGL uses ESP-IDF's C
+allocator so large image-decoder buffers can use PSRAM instead of exhausting
+LVGL's former 64 KiB fixed pool. DMA display buffers remain internal.
+
+Final v1 validation: 1,669,456-byte firmware in the 4 MiB app partition; eight
+host tests and the hardware UI smoke test pass. The final idle/listening screens
+were also verified through background QuickTime captures. Font comparison
+against the Figma reference places the first message's line extents within
+1–2 device pixels (font rasterization/RGB565 differences remain). A transient
+post-flash TCP disconnect interrupted one run; the full run passed after Wi-Fi
+settled. The bridge reconnects automatically.
+
+Panel startup reference:
+[Waveshare Arduino CO5300 driver](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.8/blob/main/examples/arduino-v2/libraries/GFX_Library_for_Arduino/src/display/Arduino_CO5300.cpp)
+and its adjacent header's initialization table. The USB `panel` diagnostic
+prints raw SPI read attempts; all-zero reads on this setup are inconclusive
+and must not be interpreted as panel state. Physical camera checks remain
+necessary for scanout verification.
+
+## ChatGPT Dot integration
+
+The existing bridge owns the device connection, persistent queue, and answers.
+The MCP adapter is `scripts/pip_mcp.py`; no model runs in the bridge. All five
+semantic tools are available over authenticated, stateless HTTP on
+`127.0.0.1:8789/mcp`. `scripts/mcp-stdio.py` forwards stdio to that endpoint for
+local Codex and Secure MCP Tunnel. The local administrative API remains on
+8788; the tunnel must target the MCP adapter, not the administrative API.
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `send_message` | `request_id`, `text`, optional `importance` | Queue a notice |
+| `ask_question` | `request_id`, `text`, `options`, optional `importance` | Queue a decision |
+| `get_request` | `request_id` | Text, status, options, selected option |
+| `get_device_status` | none | Connection, queue, subscription/delivery health |
+| `cancel_request` | `request_id` | Cancel pending request; answered requests retain their answer |
+
+Use caller-generated request IDs (up to 64 ASCII characters); retrying an ID
+requires identical content. Text supports printable ASCII/newlines, up to 600
+characters. Decisions have one to three `{id, label}` options; labels are at
+most 64 characters. `importance` is `normal` or `urgent`. Urgent requests move
+ahead of waiting normal requests but never preempt the current screen. Pending
+means queued, not confirmed displayed or read. Decisions use the approved
+paginated choice-and-confirm flow. Rescan the cloud plugin after updating its
+tool schemas or imported skill so the new option-label limit is discovered.
+
+Cancellation persists before notifying the device. A `sync` device message
+contains the host's current `card_id` or null; firmware clears a mismatching
+card and pending reply. Reconnecting receives `sync` before the current card,
+so a cancellation made while offline also clears the stale display. The new
+firmware is required for cancellation (an older build ignores `sync`).
+
+### Replies and subscriptions
+
+The MCP Events catalog advertises `device.reply`. Subscribe before sending a
+question, optionally filtering by `request_id`. Its data contains `request_id`,
+`kind`, `option_id`, and `option_label`. Notice dismissal is acknowledgement,
+not approval. The skill tells pip to recover the request and original task
+context before acting. Events contain data, not new instructions.
+
+The server implements `server/discover`, `events/list`, `events/subscribe`, and
+`events/unsubscribe` for protocol `2026-07-28`, plus legacy MCP initialization
+for local clients. Subscriptions live seven days by default; `ttlMs` grants
+between one minute and 30 days. A null requested lifetime receives seven days.
+The server returns `refreshBefore` and stops delivery at expiration. Event
+replay is not advertised (`cursor: null`); `get_request` recovers missed replies.
+
+Subscription verification and delivery use Standard Webhooks HMAC-SHA256.
+Callback URLs must use public HTTPS on port 443. DNS is checked on every
+connection, the socket is pinned to a checked address, TLS verifies the
+original hostname, and redirects/proxy environment variables are not followed.
+Subscriptions, keys, cursors, and the delivery outbox persist in the bridge's
+private state file. Retried deliveries preserve event IDs and use fresh
+signatures. Transient failures back off, with at most ten attempts; 410 stops a
+subscription, and 413/other permanent client errors stop that delivery. A 2xx
+means webhook receipt, not completion of the Dot's subsequent action. Consumers
+must deduplicate event IDs. Existing bridge answers remain queryable even if
+webhook delivery fails. Changing the MCP bearer credential revokes existing
+subscriptions after a bridge restart.
+
+Only acknowledged card replies generate MCP events. Listening taps remain
+best-effort device diagnostics; there is no microphone audio or transcript yet.
+
+### Setup: device, local bridge, and ChatGPT Dot
+
+This walkthrough targets macOS. Replace the following placeholders with your
+own values. No account IDs or API keys belong in this README or in chat.
+
+| Placeholder | Meaning |
+| --- | --- |
+| `<PROJECT_DIR>` | Absolute path to this repository |
+| `<MAC_HOSTNAME>` | Output of `scutil --get LocalHostName`, without `.local` |
+| `<TUNNEL_NAME>` | A name you choose for the tunnel, such as `desk-display` |
+| `<TUNNEL_ID>` | The `tunnel_…` ID returned by Platform |
+| `<WORKSPACE>` | The ChatGPT workspace containing your Dot |
+| `<PLUGIN_NAME>` | A name you choose for the ChatGPT plugin |
+| `<DOT_NAME>` | Your ChatGPT Dot's name |
+| `<RUNTIME_API_KEY>` | A runtime API key with Tunnels Read + Use |
+
+Names such as `rsms-dot`, `pip`, and `local.rsms.pip-bridge` in source paths,
+commands, and service labels are fixed identifiers in this implementation,
+not example account names. The tunnel helper uses the local alias `rsms-dot`
+regardless of the remote `<TUNNEL_NAME>`.
+
+#### 1. Build and flash the device
+
+Install Cargo, uv, Node/npm, and Espressif's Xtensa Rust toolchain using espup
+(the pinned toolchain is listed under Build layout). Connect the board over USB.
+
+```sh
+cd "<PROJECT_DIR>"
+sh scripts/bootstrap.sh
+sh scripts/build.sh --locked
+.tools/python/bin/python scripts/device.py info
+.tools/python/bin/python scripts/device.py flash
+```
+
+Keep the checkout at this path after installing services, which use absolute
+paths. Reinstall them if the checkout moves. Skip rebuilding/flashing if the
+current firmware is already installed.
+
+#### 2. Start the bridge and configure Wi-Fi
+
+Install the bridge as a user launchd service. It runs independently of the
+terminal or chat and starts at login. Stop any manually started bridge first;
+only one process can own ports 8787, 8788, and 8789.
+
+```sh
+.tools/python/bin/python scripts/bridge-service.py install
+scutil --get LocalHostName
+.tools/python/bin/python scripts/device.py configure --host "<MAC_HOSTNAME>.local"
+curl --fail http://127.0.0.1:8788/health
+```
+
+The configuration command prompts locally for the 2.4 GHz Wi-Fi network and
+hidden password, and sends them over USB. This launchd service uses TCP, so
+omit `--via-bridge`; that flag is only for a bridge started with `--serial`.
+Wait for health to show `connected: true` and `transport: "tcp"`.
+The Mac and device must be on a LAN that permits their connection and mDNS.
+The Mac must remain awake and online for the physical interface to work.
+
+#### 3. Install the local skill and MCP connection
+
+This step gives local Codex access. Cloud Dot access is configured separately
+in steps 4–6.
+
+```sh
+mkdir -p "$HOME/.agents/skills"
+ln -s "$PWD/skills/rsms-dot" "$HOME/.agents/skills/rsms-dot"
+codex mcp add rsms-dot -- "$PWD/.tools/python/bin/python" "$PWD/scripts/mcp-stdio.py"
+```
+
+If the symlink or MCP entry already exists, inspect it instead of creating a
+second copy. The stdio adapter reads the local bearer credential itself; no
+API key or environment variable is needed in this MCP registration.
+
+For manual entry in a desktop **local MCP** form, choose **STDIO**:
+
+| Field | Value |
+| --- | --- |
+| Name | `rsms-dot` |
+| Command | `<PROJECT_DIR>/.tools/python/bin/python` |
+| Argument | `<PROJECT_DIR>/scripts/mcp-stdio.py` |
+| Working directory | `<PROJECT_DIR>` |
+| Environment variables | None |
+
+That desktop form's **STDIO / Streamable HTTP** selector configures a local
+connection. It is not the cloud tunnel form used in step 5.
+
+#### 4. Create and start a Secure MCP Tunnel
+
+Install the official client; the helper verifies its release SHA-256 checksum:
+
+```sh
+.tools/python/bin/python scripts/tunnel.py install-client
+```
+
+In [Platform tunnel settings](https://platform.openai.com/settings/organization/tunnels),
+create `<TUNNEL_NAME>` and associate it with `<WORKSPACE>`. Copy `<TUNNEL_ID>`.
+Creating a tunnel requires Tunnels Read + Manage. Create a separate runtime
+API key whose principal has Tunnels Read + Use; do not use an admin key for the
+running daemon.
+
+```sh
+.tools/python/bin/python scripts/tunnel.py configure
+```
+
+Enter `<TUNNEL_ID>` at the first prompt and `<RUNTIME_API_KEY>` at the hidden
+key prompt. The helper stores the key in `.tools/tunnel-runtime-key`, mode
+0600, and starts a managed tunnel runtime using a file reference to that key.
+The tunnel forwards to the stdio adapter. It does not require router port
+forwarding or a public listener on the Mac.
+
+```sh
+.tools/python/bin/python scripts/tunnel.py status
+.tools/python/bin/python scripts/tunnel.py doctor
+```
+
+Expect `process_running`, `healthy`, and `ready` to be true. A running tunnel
+alone does not establish a ChatGPT plugin or event subscription.
+
+#### 5. Connect the cloud plugin in a web browser
+
+Open [ChatGPT Plugins](https://chatgpt.com/plugins) **in a web browser**, signed
+into `<WORKSPACE>`. This is distinct from the desktop local MCP form.
+
+1. Choose **Add custom MCP server**.
+2. Name it `<PLUGIN_NAME>`.
+3. Under **Connection**, choose **Tunnel** and select `<TUNNEL_NAME>` or enter
+   `<TUNNEL_ID>`.
+4. Under **Authentication**, choose **No authentication**. The tunnel is
+   authenticated using its runtime credential and Platform/workspace access
+   controls. Our adapter supplies the separate local bridge credential;
+   this server does not implement an additional OAuth login.
+5. Create/connect the private plugin and scan its capabilities. Expect
+   `send_message`, `ask_question`, `get_request`, `get_device_status`,
+   `cancel_request`, and the `device.reply` event.
+6. Make the plugin available to `<DOT_NAME>` through its connected apps/plugins.
+
+If Tunnel is unavailable, check the selected workspace, its association with
+`<TUNNEL_ID>`, and your tunnel permissions. If you only see **STDIO** and
+**Streamable HTTP**, check that you are using the web cloud connection form.
+
+The server also exposes the `io.modelcontextprotocol/skills` extension,
+`skills/list`, `skills/get`, and `resources/read`, with a SHA-256 digest for
+`skills/rsms-dot/SKILL.md`. Skill import is a scan-time snapshot; rescan after
+updating the skill. The local symlink alone does not install a cloud skill.
+No public plugin-directory publication is needed for this private setup.
+
+#### 6. Verify a complete Dot interaction
+
+Send this in `<DOT_NAME>`'s own chat, replacing `<PLUGIN_NAME>`:
+
+> Use `<PLUGIN_NAME>`. Subscribe to device.reply for request_id
+> desk-display-test-001. Ask "Can you see this?" on my desk display with options
+> Yes and No, using that request ID. When the reply event arrives, tell me here
+> which option I chose.
+
+Tap an option on the device. Confirm that the Dot reports that choice in the
+same conversation. This checks tool delivery, the physical reply, signed
+webhook receipt, and actual cloud continuation. Sending a question without a
+subscription does not arrange a wakeup. Use a fresh request ID for a new test;
+reuse an ID only to retry the same request.
+
+`get_device_status` reports active reply subscriptions and webhook delivery
+counts. `get_request` recovers a saved answer. A webhook's successful receipt
+is not proof that the Dot has completed its subsequent action.
+
+For latency diagnosis, private bridge state records the card's `created_at`
+and `answered_at`, and each webhook's `first_attempt_at`, `last_attempt_at`,
+`last_completed_at`, and `last_duration_ms`. These distinguish local dispatch
+and HTTP delivery from the time the cloud Dot takes to continue. Timing fields
+are recorded for new delivery attempts; older deliveries may lack them.
+
+#### 7. Restart, diagnose, and package
+
+```sh
+# After editing bridge/MCP code:
+.tools/python/bin/python scripts/bridge-service.py restart
+.tools/python/bin/python scripts/bridge-service.py status
+
+# Reconnect a saved tunnel configuration after stopping/rebooting:
+.tools/python/bin/python scripts/tunnel.py start
+.tools/python/bin/python scripts/tunnel.py status
+.tools/python/bin/python scripts/tunnel.py doctor
+```
+
+Bridge logs are `.tools/bridge.log` and `.tools/bridge-error.log`. The launchd
+plist is `~/Library/LaunchAgents/local.rsms.pip-bridge.plist`. Subscription
+state and answers survive bridge restarts; the device reconnects automatically.
+Keep the bridge and managed tunnel runtime running while the plugin is in use.
+
+Private files under ignored `.tools/` include `bridge-config.json` (device
+pairing token), `bridge-state.json` (cards, replies, webhook subscriptions and
+signing keys), `mcp-config.json` (local MCP bearer token), and
+`tunnel-runtime-key` (OpenAI runtime credential). Keep these local; do not add
+them to Git, plugin archives, screenshots, or documentation.
+
+`plugins/rsms-dot/plugin.json` is the portable manifest. Run
+`python3 scripts/package-plugin.py` to build `.tools/rsms-dot-plugin/` and its
+ZIP, containing a real copy of the skill and this host's stdio config. That
+package is for local installation; cloud uses the tunnel above. The generated
+archive excludes credentials, state, and runtime profiles.
+
+### Integration validation
+
+```sh
+.tools/python/bin/python -m unittest discover -s scripts -p 'test_*.py'
+# Optional isolated official SDK interoperability test (mcp 2.3.0 tested):
+uv venv --python 3.11 .tools/mcp-test-python
+uv pip install --python .tools/mcp-test-python/bin/python mcp==2.3.0
+.tools/mcp-test-python/bin/python scripts/mcp-client-smoke.py
+# Real hardware; requires an empty queue. Creates only its own test requests.
+.tools/python/bin/python scripts/mcp-device-smoke.py
+```
+
+Host tests cover durable replies and webhook retries across restarts, filtering,
+verification failures, signing, credential rotation, idempotency, cancellation,
+priority ordering, HTTP authentication, and blocked callback destinations.
+All 18 host tests pass. The official SDK test passes modern and legacy
+discovery, tools, and resources over both stdio and HTTP.
+The hardware test passed on the device after one transient USB inspection
+timeout. It sends requests through MCP/TCP, cancels a question, navigates
+and dismisses a message using simulated touch, then reads its persisted reply
+through MCP. Captures go in `.tools/mcp-smoke/`. Simulated touch is not evidence
+of a human tap or a successful cloud Dot subscription.
+
+A separate live cloud test also passed: the Dot subscribed, sent a question,
+the user tapped Yes on the device, the webhook received HTTP 200 on its first
+attempt, and the Dot reported Yes in the original conversation. End-to-end
+interaction was slow; webhook dispatch began about 144 ms after the bridge
+received the tap, but HTTP completion timing was not yet recorded. Questions
+used the prototype option buttons during that test; the later reply-choice
+design replaces them.
+
+References: [MCP Events](https://developers.openai.com/plugins/build/mcp-events),
+[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels),
+[MCP skill import](https://developers.openai.com/plugins/build/mcp-server), and
+[local skill discovery](https://learn.chatgpt.com/docs/build-skills).
