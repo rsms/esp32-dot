@@ -1,0 +1,10 @@
+.DS_Store
+.tools/
+.embuild/
+target/
+managed_components/
+sdkconfig
+sdkconfig.old
+sdkconfig.*.old
+__pycache__/
+/_*

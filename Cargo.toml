@@ -1,0 +1,29 @@
+[package]
+name = "pip-firmware"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+
+[[bin]]
+name = "pip-firmware"
+harness = false
+
+[dependencies]
+esp-idf-sys = { version = "=0.38.1", features = ["binstart"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+embuild = "=0.33.5"
+
+[profile.release]
+opt-level = "s"
+debug = true
+
+[package.metadata.esp-idf-sys]
+esp_idf_version = "v5.5.5"
+esp_idf_tools_install_dir = "workspace"
+
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/pip_board"]
+bindings_header = "components/pip_board/include/pip_board.h"
