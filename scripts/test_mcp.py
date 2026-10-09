@@ -87,6 +87,22 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.receiver.messages), 2)  # verification + exactly one event
         self.assertEqual(bridge.get('q1')['status'], 'answered')
 
+    async def test_event_discovery_exposes_reply_and_voice_webhooks(self):
+        for params in ({}, {'_meta': {'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+                                     'io.modelcontextprotocol/clientCapabilities': {}}}):
+            discovery = await self.mcp.rpc({'jsonrpc': '2.0', 'id': 1,
+                'method': 'server/discover', 'params': params})
+            self.assertIn('events', discovery['result']['capabilities'])
+            response = await self.mcp.rpc({'jsonrpc': '2.0', 'id': 2,
+                'method': 'events/list', 'params': params})
+            events = {e['name']: e for e in response['result']['events']}
+            self.assertEqual(set(events), {'device.reply', 'device.transcript'})
+            voice = events['device.transcript']
+            self.assertEqual(voice['delivery'], ['webhook'])
+            self.assertEqual(voice['inputSchema']['required'], [])
+            self.assertEqual(set(voice['payloadSchema']['required']),
+                {'recording_id', 'text', 'audio_seconds'})
+
     async def test_transcript_delivery_recovery_and_subscription_separation(self):
         await self.mcp.subscribe(self.params)
         await self.mcp.subscribe(dict(self.params, name='device.transcript'))

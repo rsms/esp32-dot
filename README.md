@@ -738,7 +738,16 @@ curl --fail http://127.0.0.1:8788/audio
 
 Wait for `ready: true`, `model: "whisper-large-v3-turbo-q8_0"`, and
 `preprocessing: "raw"`. If the plugin was connected before voice support was
-installed, rescan it to discover `device.transcript` and `get_voice_input`.
+installed, rescan its MCP server on the ChatGPT plugin page to discover
+`device.transcript` and `get_voice_input`. In the plugin settings UI, the available
+action is **Manage app → Refresh tools**. Do not assume that clicking it updated
+the event catalog: confirm that the plugin's event list
+shows **both `device.reply` and `device.transcript`** before asking Dot to subscribe.
+A bridge restart does not refresh ChatGPT's scanned plugin catalog. If Dot sees
+only `device.reply`, rescan first, then ask it to retry the voice subscription.
+The server returns both events from `events/list`; voice delivery uses `webhook`
+with `recording_id`, `text`, and `audio_seconds` in the payload. See the official
+[MCP Events testing steps](https://developers.openai.com/plugins/build/mcp-events#test-in-chatgpt).
 
 Send this in `<DOT_NAME>`'s own chat, replacing `<PLUGIN_NAME>`:
 

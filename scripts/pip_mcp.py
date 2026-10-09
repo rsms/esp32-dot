@@ -23,6 +23,7 @@ VERSIONS = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"
 VERSION_META = "io.modelcontextprotocol/protocolVersion"
 CLIENT_META = "io.modelcontextprotocol/clientCapabilities"
 SERVER_META = "io.modelcontextprotocol/serverInfo"
+SERVER_INFO = {"name": "rsms-dot", "version": "0.2.0"}
 SKILL = ROOT / "skills/rsms-dot/SKILL.md"
 SKILL_URI = "skill://rsms-dot/rsms-dot/SKILL.md"
 INSTRUCTIONS = (
@@ -94,7 +95,7 @@ REPLY_SCHEMA = obj({"request_id": REQUEST_ID, "kind": {"type": "string", "enum":
 EVENTS = [{"name": "device.reply", "description": "Rasmus selected a decision option or dismissed a message on pip. Use request_id to recover its original context. A notice dismissal is not approval.",
     "delivery": ["webhook"], "inputSchema": obj({"request_id": string(64, "Optional filter for a single request. Omit to monitor all replies.")}),
     "payloadSchema": REPLY_SCHEMA},
-    {"name": "device.transcript", "description": "A tap-to-record voice input transcribed locally with Phonon-2. Deduplicate by recording_id. Recognition can be inaccurate.",
+    {"name": "device.transcript", "description": "A push-to-talk voice input transcribed locally with Whisper turbo. Deduplicate by recording_id. Recognition can be inaccurate.",
      "delivery": ["webhook"], "inputSchema": obj({}),
      "payloadSchema": obj({"recording_id": string(64), "text": string(8192),
          "audio_seconds": {"type": "number"}}, ["recording_id", "text", "audio_seconds"])}]
@@ -401,7 +402,7 @@ class MCP:
     async def dispatch(self, method, params):
         capabilities = {"tools": {}, "events": {}, "resources": {},
             "extensions": {"io.modelcontextprotocol/skills": {}}}
-        info = {"name": "rsms-dot", "version": "0.1.0"}
+        info = SERVER_INFO
         if method == "server/discover":
             return {"resultType": "complete", "supportedVersions": VERSIONS, "_meta": {SERVER_META: info},
                 "capabilities": capabilities, "instructions": INSTRUCTIONS, "cacheScope": "private", "ttlMs": 0}
@@ -467,7 +468,7 @@ class MCP:
             result = await self.dispatch(message["method"], message.get("params", {}))
             if modern:
                 result["resultType"] = "complete"
-                result.setdefault("_meta", {})[SERVER_META] = {"name": "rsms-dot", "version": "0.1.0"}
+                result.setdefault("_meta", {})[SERVER_META] = SERVER_INFO
                 if message["method"] in ("server/discover", "tools/list", "resources/list", "resources/read"):
                     result.update(cacheScope="private", ttlMs=0)
             return {"jsonrpc": "2.0", "id": rid, "result": result}
