@@ -1095,3 +1095,27 @@ alongside scores. Twelve familiar prompts are a small diagnostic set, not proof 
 accuracy on spontaneous speech or unfamiliar names. This benchmark does not switch
 the live recognizer from Phonon.
 
+### Experimental transcript correction
+
+A small local LLM can be evaluated independently after recognition using
+[Ollama](https://docs.ollama.com/api/chat). Start Ollama locally and install its model:
+
+```sh
+ollama pull qwen3:4b
+.tools/python/bin/python scripts/transcript-correction.py <WHISPER_REPORT.json> \
+    --model qwen3:4b --output <NEW_CORRECTION_REPORT.json>
+```
+
+Only transcripts go to the local loopback endpoint. The fixed prompt asks for minimal
+repairs, treats transcript content as data, and instructs the model to preserve names,
+dates, numbers, and uncertain wording. No reference phrases are sent. The report
+retains originals, corrections, exact prompt, model digest, scores, and timings.
+Each sample gets a fresh conversation. Correction remains offline and opt-in.
+
+On the same twelve samples, Qwen3 4B Q4_K_M with thinking disabled fixed `yumps` and
+`for20`, but repaired a garbled reminder to `water the plant this morning` when the
+prompt said `water the plants tomorrow morning`. Strict errors fell from six to
+three, yet the invented date is consequential. Correcting Whisper turbo changed none
+of its twelve transcripts and added a median 160 ms (188 ms for Phonon transcripts).
+Raw Whisper turbo was therefore the strongest candidate in this comparison;
+automatic LLM correction is not enabled in the live voice path.
