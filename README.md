@@ -752,8 +752,10 @@ with `recording_id`, `text`, and `audio_seconds` in the payload. See the officia
 Send this in `<DOT_NAME>`'s own chat, replacing `<PLUGIN_NAME>`:
 
 > Use `<PLUGIN_NAME>` and subscribe to device.transcript. Treat incoming
-> transcripts as voice messages from me. Use get_device_status to confirm
-> the voice subscription is active.
+> transcripts as voice messages from me. Reply on my desk display using
+> send_message, or ask_question when I need to choose an option; a chat-only
+> response is not sufficient. Subscribe to device.reply to receive my choices.
+> Use get_device_status to confirm the voice subscription is active.
 
 `get_device_status` should report `voice_subscriptions` greater than zero and
 `audio_available: true`. Connecting the plugin or subscribing to `device.reply`
@@ -761,9 +763,10 @@ does not subscribe to voice input. Without a voice subscription, accepted
 transcripts are saved locally but are not automatically delivered to Dot.
 
 To verify delivery, hold the sleeping or idle screen, wait for the listening
-state, say "Please tell me here that you received this voice test," and release.
-Speak for more than two seconds at normal volume. Confirm that Dot responds in
-its chat. Recognition runs locally; only the resulting text and recording
+state, say "Please send a message to my desk display confirming you received this voice test,"
+and release. Speak for more than two seconds at normal volume. Confirm that a
+message appears on the device; a response only in chat does not verify the
+return path to the display. Recognition runs locally; only the resulting text and recording
 metadata are sent through the voice event, not the audio. Ordinary voice audio
 is not retained on disk; voice-tuning mode intentionally saves WAVs and never
 sends those practice phrases as voice events. Transcripts remain in local bridge
@@ -774,6 +777,10 @@ subscription and webhook delivery status with `get_device_status`. Subscriptions
 expire and must be renewed by the subscriber; ask Dot to subscribe again if none
 is active. Successful webhook delivery confirms receipt, not completion of Dot's
 response. Cloud continuation can take longer than local recognition.
+If a particular transcript was accepted by the webhook but Dot has not answered,
+ask Dot to recover it with `get_voice_input` using its recording ID and respond
+through `send_message`. Avoid replaying an already accepted webhook: it can cause
+duplicate handling without resolving a delayed cloud continuation.
 
 #### 8. Restart, diagnose, and package
 
