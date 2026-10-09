@@ -725,7 +725,48 @@ and `answered_at`, and each webhook's `first_attempt_at`, `last_attempt_at`,
 and HTTP delivery from the time the cloud Dot takes to continue. Timing fields
 are recorded for new delivery attempts; older deliveries may lack them.
 
-#### 7. Restart, diagnose, and package
+#### 7. Enable push-to-talk messages to Dot
+
+Install the local recognizer and restart the bridge while no recording is active.
+This requires CMake and GNU make (`gmake`) on macOS:
+
+```sh
+sh scripts/setup-audio.sh
+.tools/python/bin/python scripts/bridge-service.py restart
+curl --fail http://127.0.0.1:8788/audio
+```
+
+Wait for `ready: true`, `model: "whisper-large-v3-turbo-q8_0"`, and
+`preprocessing: "raw"`. If the plugin was connected before voice support was
+installed, rescan it to discover `device.transcript` and `get_voice_input`.
+
+Send this in `<DOT_NAME>`'s own chat, replacing `<PLUGIN_NAME>`:
+
+> Use `<PLUGIN_NAME>` and subscribe to device.transcript. Treat incoming
+> transcripts as voice messages from me. Use get_device_status to confirm
+> the voice subscription is active.
+
+`get_device_status` should report `voice_subscriptions` greater than zero and
+`audio_available: true`. Connecting the plugin or subscribing to `device.reply`
+does not subscribe to voice input. Without a voice subscription, accepted
+transcripts are saved locally but are not automatically delivered to Dot.
+
+To verify delivery, hold the sleeping or idle screen, wait for the listening
+state, say "Please tell me here that you received this voice test," and release.
+Speak for more than two seconds at normal volume. Confirm that Dot responds in
+its chat. Recognition runs locally; only the resulting text and recording
+metadata are sent through the voice event, not the audio. Ordinary voice audio
+is not retained on disk; voice-tuning mode intentionally saves WAVs and never
+sends those practice phrases as voice events. Transcripts remain in local bridge
+state even after delivery.
+
+If local recognition succeeds but Dot does not respond, check the active voice
+subscription and webhook delivery status with `get_device_status`. Subscriptions
+expire and must be renewed by the subscriber; ask Dot to subscribe again if none
+is active. Successful webhook delivery confirms receipt, not completion of Dot's
+response. Cloud continuation can take longer than local recognition.
+
+#### 8. Restart, diagnose, and package
 
 ```sh
 # After editing bridge/MCP code:
@@ -881,8 +922,8 @@ The worker receives an in-memory WAV over a loopback-only HTTP endpoint; ordinar
 voice recordings are not written to disk. Short/quiet/cancelled recordings never
 reach recognition. Tuning explicitly retains recordings as described below.
 
-Rescan the `rsms-dot` plugin to discover `device.transcript` and `get_voice_input`.
-Ask Dot to subscribe to `device.transcript` for ongoing voice input. Events use
+Follow [setup step 7](#7-enable-push-to-talk-messages-to-dot) to subscribe Dot to
+`device.transcript` and verify voice delivery. Events use
 the same durable signed-webhook delivery as replies; consumers should deduplicate
 `recording_id` and account for recognition errors. The local skill includes the
 voice workflow. End-to-end cloud voice delivery still requires that subscription;
