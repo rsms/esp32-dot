@@ -362,8 +362,13 @@ async def serve(args):
         if not port:
             raise ValueError("Expected one USB device; specify --serial /dev/cu.usbmodem…")
         tasks.append(UsbPeer(port).run(bridge))
-    async with tcp, http, rpc, audio:
-        await asyncio.gather(*tasks)
+    import signal
+    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
+    try:
+        async with tcp, http, rpc, audio:
+            await asyncio.gather(*tasks)
+    finally:
+        await bridge.audio.worker.stop()
 
 
 if __name__ == "__main__":
@@ -376,5 +381,5 @@ if __name__ == "__main__":
     parser.add_argument("--serial", help="Optional USB transport: auto or a serial port")
     try:
         asyncio.run(serve(parser.parse_args()))
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass

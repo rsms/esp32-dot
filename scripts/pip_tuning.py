@@ -172,6 +172,8 @@ class VoiceTuning:
         elif action == 'stop':
             await self.stop()
         elif action == 'apply':
+            if getattr(self.bridge.audio.worker, 'name', '').startswith('whisper-'):
+                raise ValueError('Live Whisper input uses raw PCM; filter comparisons are offline only')
             report = recommendation(self.records)
             if not report['eligible']:
                 raise ValueError(report['reason'])
@@ -256,7 +258,8 @@ class VoiceTuning:
         original = directory / (stem + '-raw.wav')
         save_wav(original, recording.pcm)
         record = dict(context, **summary, prompt_id=context['id'], decision='pending',
-            wav=str(original), results={}, timestamp=time.time())
+            wav=str(original), results={}, timestamp=time.time(),
+            recognizer=getattr(worker, 'name', 'phonon-2'))
         self.records.append(record)
         # Save the source before trying inference, so a worker failure cannot
         # destroy the labelled recording. No tuning transcript enters MCP events.

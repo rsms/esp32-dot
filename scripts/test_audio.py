@@ -47,6 +47,7 @@ class FakeWorker:
 
     async def transcribe(self, request_id, pcm):
         self.calls += 1
+        self.pcm = bytes(pcm)
         return {'text': 'A local test.', 'transcribe_seconds': 0.01}
 
 
@@ -104,6 +105,12 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.bridge.state['events']), 1)
         self.assertEqual(self.bridge.state['events'][0]['text'], 'A local test.')
         self.assertFalse(self.service.active)
+
+    async def test_live_pcm_is_raw_even_with_an_old_filter_profile(self):
+        self.service.tuning.profile = 'trim_highpass'
+        self.assertEqual((await self.recording())['status'], 'transcribed')
+        self.assertEqual(self.worker.pcm, tone() * 101)
+        self.assertEqual(self.service.status()['preprocessing'], 'raw')
 
     async def test_malformed_packet_does_not_poison_next_session(self):
         self.assertIn('error', await self.recording(malformed=True))

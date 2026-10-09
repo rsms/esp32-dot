@@ -852,32 +852,34 @@ removes per-block DC offset; its default RMS threshold is 0.0126 (about -38 dBFS
 Use the bridge's `--audio-threshold` option for calibration. This is a simple
 energy gate, not a speech classifier; sustained background noise can pass it.
 
-Accepted audio goes to a resident native Swift worker using
-[Phonon-2 CoreML](https://github.com/fermionresearch/phonon-coreml), pinned at
-1.1.2. It requires Apple silicon, macOS 15+, and Swift 6. The model is downloaded
-into `.tools/Phonon-2-CoreML`; all encoder sizes are prepared before reporting
-ready. Initial CoreML preparation can take several minutes. After preparation,
-a supplied 10.435-second fixture transcribed in 26–37 ms on the development Mac.
-This excludes recording time, transport, and cloud Dot scheduling.
+Accepted audio goes unchanged to a resident [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
+worker running **large-v3-turbo Q8**. There is no host denoising, edge trimming,
+normalization, or LLM text correction in the live path. Firmware still drains the
+codec's startup transient and applies its 5 ms startup fade, described below.
+Whisper is built from a pinned source revision; model downloads are checksum verified.
+On the development Mac it uses Metal acceleration and takes about 114 ms per saved
+tuning utterance after warmup. This excludes capture, transport, and cloud scheduling.
 
-Phonon's public API transcribes complete utterances. PCM streams during capture;
-recognition begins after the stop/level gate. The model stays loaded between
-utterances. No remote recognition service is required.
+PCM streams during capture; recognition begins after the stop/level gate. The model
+stays loaded between utterances, with separate context for each request. A synthetic
+silence request warms Metal kernels before readiness is reported. The bridge event
+loop remains responsive while the model starts and runs. If the worker exits or a
+request fails, audio becomes unavailable while a fresh worker starts automatically.
+Normal shutdown stops the child process. No remote recognition service is required.
 
 ```sh
 sh scripts/setup-audio.sh
 .tools/python/bin/python scripts/bridge-service.py restart
 curl --fail http://127.0.0.1:8788/audio
-.tools/python/bin/python scripts/phonon-bench.py
 # Records three seconds using the actual device microphone:
 .tools/python/bin/python scripts/audio-smoke.py
 ```
 
-`/audio` reports readiness, capture status, signal levels, and timing without
-returning speech text. Accepted transcripts are persisted alongside bridge events.
-The worker uses a private temporary WAV and deletes it after transcription;
-short/quiet/cancelled recordings never reach the worker. Abrupt process or power
-loss can leave a temporary WAV in `.tools/audio`; startup removes matching leftovers older than two minutes.
+`/audio` reports readiness, model name, raw preprocessing, capture status, signal
+levels, and timing without returning speech text. Accepted transcripts are persisted alongside bridge events.
+The worker receives an in-memory WAV over a loopback-only HTTP endpoint; ordinary
+voice recordings are not written to disk. Short/quiet/cancelled recordings never
+reach recognition. Tuning explicitly retains recordings as described below.
 
 Rescan the `rsms-dot` plugin to discover `device.transcript` and `get_voice_input`.
 Ask Dot to subscribe to `device.transcript` for ongoing voice input. Events use
@@ -886,12 +888,14 @@ the same durable signed-webhook delivery as replies; consumers should deduplicat
 voice workflow. End-to-end cloud voice delivery still requires that subscription;
 local fixture and microphone tests do not create it automatically. Cloud event delivery latency is separate from local ASR latency.
 
-The Phonon code is Apache-2.0. Model weights are by Fermion Research under
-[CC-BY-4.0](https://huggingface.co/FermionResearch/Phonon-2-CoreML); they are
-external downloads and are not included in this repository.
+Whisper code and model weights use the MIT license. Downloads and build products
+are excluded from Git. The former Phonon recognizer remains available for offline
+comparisons: `sh scripts/setup-phonon.sh`, then
+`.tools/python/bin/python scripts/phonon-bench.py`. Its code is Apache-2.0 and its
+Fermion Research model weights are [CC-BY-4.0](https://huggingface.co/FermionResearch/Phonon-2-CoreML).
 
 
-Audio validation: the device streamed 12 seconds of microphone samples without
+Historical Phonon validation: the device streamed 12 seconds of microphone samples without
 blocking the UI, and quiet-room/very quiet speaker playback was discarded. The
 host's isolated PCM fixture test recognized the expected text about 90 ms after
 the final packet. A 7.46-second spoken test passed the level gate and transcribed
@@ -951,7 +955,8 @@ Accepted samples are compared using original PCM, an 80 Hz high-pass filter
 (removes DC and low-frequency rumble), and the high-pass filter with quiet edge
 trimming (preserves 250 ms of context). Each processed WAV is also saved. These
 are candidates to measure, not assumptions about what improves the microphone.
-Reference phrases are never passed to Phonon. The score ignores punctuation and
+Reference phrases are never passed to the recognizer. Each new record identifies
+its recognizer; historical records without that field used Phonon. The score ignores punctuation and
 case but counts substitutions, insertions, and deletions. Only explicitly
 submitted takes count toward calibration. Retried and abandoned takes remain
 available as WAVs but are excluded from scores. Retry and Submit messages are
@@ -961,20 +966,16 @@ a sample twice or advance twice.
 Every fourth distinct phrase is reserved for validation. A candidate is selected
 using practice phrases; applying it requires at least three distinct practice
 phrases and two distinct validation phrases, lower aggregate error on both, and
-no individual validation recording that is worse than the original. Nothing is
-applied automatically. These small-sample checks are a starting point, not proof
+no individual validation recording that is worse than the original. With the live Whisper worker, these are offline comparisons only: `apply` is
+rejected and normal voice input always uses raw PCM. Nothing is applied automatically. These small-sample checks are a starting point, not proof
 of general accuracy.
 
 ```sh
-.tools/python/bin/python scripts/voice-tune.py apply  # Only a validated improvement
-.tools/python/bin/python scripts/voice-tune.py reset  # Original PCM again
+.tools/python/bin/python scripts/voice-tune.py reset  # Clear a historical filter profile
 ```
 
-The selected preprocessing profile persists in `.tools/voice-tuning/profile.json`
-and affects subsequent normal voice input. Model weights are unchanged. The
-[pinned Phonon package](https://github.com/fermionresearch/phonon-coreml/tree/1.1.2)
-provides inference and a compiled decoder, with no supported LoRA/fine-tuning API.
-The retained WAV/reference pairs provide a dataset for evaluating other filters,
+Historical preprocessing profiles in `.tools/voice-tuning/profile.json` do not alter
+the live raw-audio path. Model weights are unchanged by tuning. The retained WAV/reference pairs provide a dataset for evaluating other filters,
 microphone settings, or a future trainable recognizer. Automatic word replacement
 is not enabled: changing valid words can conceal microphone or recognition errors.
 
@@ -984,7 +985,7 @@ The authenticated MCP server also exposes `list_voice_recordings` and
 `format: "wav"` returns the original PCM container. MP3 conversion uses FFmpeg
 from PATH or `/opt/homebrew/bin/ffmpeg`. Only retained tuning samples are readable;
 there is no arbitrary file-path tool. The tool returns MCP audio content without
-the reference phrase or Phonon result, allowing a blind listening/transcription
+the reference phrase or recognition result, allowing a blind listening/transcription
 comparison. Retrieving audio through the cloud plugin transfers that selected
 sample to its caller; collection itself does not upload it.
 
@@ -1073,13 +1074,13 @@ The model download is separate from inference; recordings remain on this compute
 The benchmark starts a temporary loopback-only server, warms the model, measures
 complete requests, and stops the server afterward. Expected phrases are used only
 for scoring; they are never sent to the recognizer. It compares accepted recordings
-with the Phonon raw results saved during tuning.
+with the raw results saved during tuning, recording the baseline model name.
 
 The October 2026 twelve-phrase experiment found:
 
 | Recognizer/input | Result compared with the spoken prompt | Median warm request |
 | --- | --- | --- |
-| Phonon/raw | Word mistakes in two phrases; also joined `for20` | Existing resident recognizer |
+| Phonon/raw | Word mistakes in two phrases; also joined `for20` | Previous resident recognizer |
 | Whisper base.en/raw | More errors than Phonon | 32 ms |
 | Whisper small.en/raw | More errors than Phonon | 60 ms |
 | Whisper large-v3-turbo Q8/raw | All twelve match apart from punctuation/number formatting | 114 ms |
@@ -1092,8 +1093,8 @@ versus `twenty`, `1/4 past 3` versus `quarter past three`, and `10:30` versus `t
 as differences. Consequently its seven strict errors for raw Whisper turbo are all
 number formatting; that score alone would give the wrong ranking. Inspect transcripts
 alongside scores. Twelve familiar prompts are a small diagnostic set, not proof of
-accuracy on spontaneous speech or unfamiliar names. This benchmark does not switch
-the live recognizer from Phonon.
+accuracy on spontaneous speech or unfamiliar names. The bridge now uses raw Whisper turbo by default; running the offline benchmark
+does not change the bridge configuration.
 
 ### Experimental transcript correction
 
@@ -1119,3 +1120,10 @@ three, yet the invented date is consequential. Correcting Whisper turbo changed 
 of its twelve transcripts and added a median 160 ms (188 ms for Phonon transcripts).
 Raw Whisper turbo was therefore the strongest candidate in this comparison;
 automatic LLM correction is not enabled in the live voice path.
+
+
+Live Whisper integration checks passed for in-memory PCM preservation, an old filter
+profile being ignored, startup without blocking the bridge event loop, automatic
+recovery after a killed native worker, and authenticated audio streaming through an
+isolated bridge. The twelve retained accepted recordings were transcribed again
+through the resident worker. Tests publish no fixture transcripts to cloud Dot.

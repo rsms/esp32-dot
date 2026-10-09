@@ -1,4 +1,4 @@
-"""Bounded PCM streaming and resident Phonon-2 worker for the local bridge."""
+"""Bounded PCM streaming and resident local ASR worker for the local bridge."""
 import asyncio
 from array import array
 import hmac
@@ -11,7 +11,8 @@ import sys
 import tempfile
 import time
 import wave
-from pip_tuning import VoiceTuning, preprocess
+from pip_tuning import VoiceTuning
+from pip_whisper import WhisperWorker
 
 ROOT = Path(__file__).resolve().parent.parent
 RATE = 16000
@@ -72,7 +73,7 @@ class PhononWorker:
         binary = ROOT / '.tools/phonon-build/release/DotTranscriber'
         model = ROOT / '.tools/Phonon-2-CoreML'
         if not binary.exists() or not model.exists():
-            self.error = 'Run scripts/setup-audio.sh to install the local model and worker'
+            self.error = 'Run scripts/setup-phonon.sh to install the comparison model and worker'
             return
         try:
             directory = ROOT / '.tools/audio'
@@ -135,7 +136,7 @@ class PhononWorker:
 class AudioService:
     def __init__(self, bridge, worker=None, threshold=0.0126):
         self.bridge = bridge
-        self.worker = worker or PhononWorker()
+        self.worker = worker or WhisperWorker()
         self.threshold = threshold
         self.active = False
         self.stage = "idle"
@@ -145,7 +146,8 @@ class AudioService:
     def status(self):
         return {'ready': self.worker.ready, 'recording': self.stage == 'recording',
             'busy': self.active, 'stage': self.stage,
-            'error': self.worker.error, 'last': self.last, 'preprocessing': self.tuning.profile, 'tuning': self.tuning.active}
+            'error': self.worker.error, 'last': self.last, 'preprocessing': 'raw',
+            'model': getattr(self.worker, 'name', 'phonon-2'), 'tuning': self.tuning.active}
 
     async def client(self, reader, writer):
         owns_session = False
@@ -200,7 +202,7 @@ class AudioService:
                 await reply(summary)
                 return
             self.stage = "transcribing"
-            result = await self.worker.transcribe(request_id, preprocess(recording.pcm, self.tuning.profile))
+            result = await self.worker.transcribe(request_id, bytes(recording.pcm))
             text = result['text'].strip()
             summary.update(status='transcribed' if text else 'empty',
                 transcribe_seconds=result['transcribe_seconds'])

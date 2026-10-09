@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare a resident Whisper model with recorded Phonon results. All inference is local."""
+"""Compare a resident Whisper model with recorded baseline results. All inference is local."""
 import argparse
 import hashlib
 import json
@@ -42,7 +42,8 @@ def main():
                 paths = {'raw': original}
                 paths.update({name: v['path'] for name, v in enhanced.get(original, {}).items()})
                 row = {'id': record['id'], 'reference': record['reference'], 'split': record['split'],
-                    'phonon': record['results']['raw'], 'whisper': {}}
+                    'baseline': record['results']['raw'],
+                    'baseline_model': record.get('recognizer', 'phonon-2'), 'whisper': {}}
                 for name, path in paths.items():
                     read_wav(path)  # Require the same mono 16 kHz PCM16 input format.
                     result = worker.transcribe(path)

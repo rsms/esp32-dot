@@ -59,6 +59,11 @@ class TuningTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.temp.cleanup()
 
+    async def test_whisper_does_not_apply_a_filter_profile(self):
+        self.worker.name = 'whisper-large-v3-turbo-q8_0'
+        with self.assertRaisesRegex(ValueError, 'uses raw PCM'):
+            await self.tuning.command({'action': 'apply'})
+
     async def capture(self):
         await self.tuning.command({'action': 'start'})
         context = self.tuning.capture_context(self.tuning.prompt['id'])

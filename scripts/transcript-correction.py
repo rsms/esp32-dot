@@ -61,8 +61,9 @@ def main():
     with args.output.open('x') as output:
         correct(http, args.model, 'This is a transcription test.')  # Exclude model loading from comparisons.
         for row in source['records']:
-            item = {'id': row['id'], 'reference': row['reference'], 'split': row['split'], 'results': {}}
-            for engine, original in [('phonon', row['phonon']), ('whisper', row['whisper']['raw'])]:
+            item = {'id': row['id'], 'reference': row['reference'], 'split': row['split'],
+                'baseline_model': row.get('baseline_model', 'phonon-2'), 'results': {}}
+            for engine, original in [('baseline', row.get('baseline', row.get('phonon'))), ('whisper', row['whisper']['raw'])]:
                 result = correct(http, args.model, original['text'])
                 result.update(word_error(row['reference'], result['text']))
                 result['original'] = original['text']
@@ -75,7 +76,7 @@ def main():
             output.write('\n')
             output.truncate()
             output.flush()
-    for engine in ('phonon', 'whisper'):
+    for engine in ('baseline', 'whisper'):
         results = [r['results'][engine] for r in report['records']]
         print(engine, 'strict errors:', sum(r['original_score']['errors'] for r in results),
             '->', sum(r['errors'] for r in results), 'median seconds:',
