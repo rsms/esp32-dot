@@ -1028,3 +1028,32 @@ settings, not live defaults. `comparison.json` records exact filters and levels.
 On the initial four spoken samples, local Phonon recognition showed no consistent
 improvement. The enclosure's effect needs an exposed-microphone comparison;
 EQ cannot establish or repair missing acoustic detail.
+
+### Neural noise reduction and alternative recognition
+
+Offline comparisons can use [RNNoise models](https://github.com/GregorR/rnnoise-models)
+through FFmpeg and [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) through
+its native CLI. Install FFmpeg first; the pinned DeepFilterNet download currently
+supports Apple Silicon macOS. Downloads are checksum verified and stored in `.tools`.
+
+```sh
+.tools/python/bin/python scripts/setup-audio-eval.py
+.tools/python/bin/python scripts/audio-enhance.py <SESSION_DIRECTORY> --output <NEW_DIRECTORY>
+```
+
+The export creates `*-rnnoise.wav`, `*-deepfilter.wav`, and a manifest containing
+source hashes and processing times. Originals are checked for changes during export;
+the live preprocessing profile is untouched. Both outputs retain the original
+16 kHz mono PCM16 format and sample count. RNNoise uses the `bd` voice model,
+up to 12 dB temporary gain with peak headroom, and compensates its 10 ms delay.
+DeepFilterNet uses its embedded model and delay compensation. Both receive trailing
+silence to flush their final frames; padding is removed from the result.
+
+On twelve recorded tuning phrases, the lowest-energy intervals were around -55 dBFS.
+Compared at those same 32 ms intervals (the lowest-energy 20%), RNNoise reduced level by approximately 20 dB and
+DeepFilterNet by 39 dB. These are measurements of low-energy intervals, not a clean
+reference-based SNR estimate. Stronger suppression can remove speech detail: both
+neural candidates produced more recognition mistakes than the raw recordings.
+The enclosure remains a possible source of muffling; an exposed-microphone recording
+is needed to separate acoustic loss from electronics and background noise.
+
