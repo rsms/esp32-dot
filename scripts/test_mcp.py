@@ -122,6 +122,42 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len([m for m in self.receiver.messages if 'eventId' in m[0]]), 1)
         self.assertTrue((await self.call('get_voice_input', {'recording_id': 'missing'}))['isError'])
 
+    async def test_background_delivery_does_not_wait_for_the_next_transcript(self):
+        loop = asyncio.get_running_loop()
+        received = asyncio.Queue()
+
+        def receive(url, body, headers):
+            result = self.receiver(url, body, headers)
+            payload = json.loads(body)
+            if payload.get('name') == 'device.transcript':
+                loop.call_soon_threadsafe(received.put_nowait, payload)
+            return result
+
+        self.mcp.sender = receive
+        params = dict(self.params, name='device.transcript')
+        await self.mcp.subscribe(params)
+        worker = asyncio.create_task(self.mcp.deliver_events())
+        try:
+            for seq, text in enumerate(('First message', 'Second message', 'Last message'), 1):
+                # No next event or inbound tool call can wake delivery: wait for
+                # this event's complete payload before producing anything else.
+                recording_id = f'voice-{seq}'
+                self.bridge.state['events'].append({'seq': seq, 'type': 'transcript',
+                    'id': recording_id, 'text': text, 'audio_seconds': 2.0, 'timestamp': time.time()})
+                self.bridge.save()
+                event = await asyncio.wait_for(received.get(), timeout=5)
+                self.assertEqual(event['data'], {'recording_id': recording_id,
+                    'text': text, 'audio_seconds': 2.0})
+                if seq == 1:
+                    await self.mcp.subscribe(params)  # Renewal must not shift the cursor.
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(received.get(), timeout=0.6)
+            self.assertEqual([item['status'] for item in self.mcp.state['outbox']],
+                ['delivered'] * 3)
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
     async def test_retry_keeps_event_id_across_restart(self):
         await self.mcp.subscribe(self.params)
         await self.question()
