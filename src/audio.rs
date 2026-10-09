@@ -40,7 +40,8 @@ fn record(generation: u32, endpoint: &Endpoint) -> std::io::Result<()> {
     let token = &endpoint.token;
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
     stream.set_nodelay(true)?;
-    stream.set_write_timeout(Some(Duration::from_millis(250)))?;
+    // Bound stalls without aborting a take on a brief Wi-Fi pause.
+    stream.set_write_timeout(Some(Duration::from_secs(1)))?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let id = format!("voice-{}-{generation}", unsafe {
         esp_idf_sys::esp_timer_get_time()
@@ -75,6 +76,25 @@ fn record(generation: u32, endpoint: &Endpoint) -> std::io::Result<()> {
     }
     let result: std::io::Result<()> = (|| {
         let mut samples = [0i16; 320];
+        // ES8311 startup produces a repeatable, sometimes clipped transient in
+        // the first 20 ms and a decaying DC offset. Drain 300 ms before
+        // sending PCM or indicating readiness.
+        // Check the hold between reads so a quick release still cancels startup.
+        for _ in 0..15 {
+            if unsafe { esp_idf_sys::pip_ui_audio_state() } != (generation | 1) {
+                reader.get_mut().write_all(&u16::MAX.to_be_bytes())?;
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            let read = unsafe { esp_idf_sys::pip_audio_read(samples.as_mut_ptr(), 320) };
+            if read != 0 {
+                println!("pip: microphone settling read failed ({read})");
+                return Err(std::io::ErrorKind::Other.into());
+            }
+        }
+        if unsafe { esp_idf_sys::pip_ui_audio_state() } != (generation | 1) {
+            reader.get_mut().write_all(&u16::MAX.to_be_bytes())?;
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
         let began = Instant::now();
         let mut blocks = 0;
         let mut packet = [0u8; 642];
@@ -87,6 +107,12 @@ fn record(generation: u32, endpoint: &Endpoint) -> std::io::Result<()> {
             if read != 0 {
                 println!("pip: microphone read failed ({read})");
                 return Err(std::io::ErrorKind::Other.into());
+            }
+            if blocks == 0 {
+                // A 5 ms ramp avoids a discontinuity at the retained boundary.
+                for (i, sample) in samples[..80].iter_mut().enumerate() {
+                    *sample = (*sample as i32 * i as i32 / 79) as i16;
+                }
             }
             for (bytes, sample) in packet[2..].chunks_exact_mut(2).zip(samples.iter()) {
                 bytes.copy_from_slice(&sample.to_le_bytes());

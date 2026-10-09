@@ -1003,3 +1003,28 @@ the recording frame, WAV retention, review tap boundaries,
 Retry, Submit, and Exit. Device screenshots were compared with the three Figma
 reference frames. A quiet-room sample was correctly kept for inspection while
 skipping recognition. See the listening-comparison results below.
+
+### Microphone startup and listening comparisons
+
+The first four spoken tuning recordings had a repeatable startup impulse in the
+first 20 ms; three clipped at full scale there, with no rail clipping after
+100 ms. Subsequent checks also showed a decaying DC offset. Firmware drains fifteen
+20 ms codec blocks and applies a 5 ms fade-in before marking the tuning microphone
+ready. This adds 300 ms of settling time; stopping during
+that time cancels startup. The 30-second capture limit starts after settling.
+Input gain remains 30 dB because the later speech did not clip.
+
+For offline listening comparisons of recordings with this startup issue:
+
+```sh
+.tools/python/bin/python scripts/audio-compare.py <SESSION_DIRECTORY> --output <NEW_DIRECTORY>
+```
+
+This preserves originals and creates depopped, gently denoised, and denoised plus
+presence-EQ WAVs. The depop candidate removes 60 ms and fades in over 5 ms;
+denoising uses an 80 Hz high-pass and FFmpeg `afftdn` with 8 dB reduction and a
+-55 dBFS noise floor; presence EQ adds 3 dB around 2.5 kHz. These are audition
+settings, not live defaults. `comparison.json` records exact filters and levels.
+On the initial four spoken samples, local Phonon recognition showed no consistent
+improvement. The enclosure's effect needs an exposed-microphone comparison;
+EQ cannot establish or repair missing acoustic detail.
