@@ -1,5 +1,6 @@
 #include "pip_board.h"
 #include "pip_assets.h"
+#include "pip_sleep.h"
 #include "esp_lvgl_port.h"
 #include "esp_err.h"
 #include "lvgl.h"
@@ -25,6 +26,7 @@ static bool confirming;
 static lv_point_t pressed;
 static bool pointer_down;
 static lv_timer_t *attention_timer;
+static lv_timer_t *idle_timer;
 static atomic_uint choice;
 static atomic_uint interaction;
 static char state[16] = "sleeping";
@@ -33,6 +35,19 @@ static uint16_t offsets[168];
 static unsigned pages, page;
 static bool error_card, submitted;
 static void render_page(void);
+static void face(const char *name);
+
+static void idle_activity(void)
+{
+    if (idle_timer && !strcmp(state, "idle")) lv_timer_reset(idle_timer);
+}
+
+static void idle_elapsed(lv_timer_t *timer)
+{
+    if (strcmp(state, "idle")) return;
+    if (pointer_down) lv_timer_reset(timer);
+    else face("sleeping");
+}
 
 static lv_obj_t *box(lv_obj_t *parent, int x, int y, int w, int h, uint32_t color, int radius)
 {
@@ -59,6 +74,8 @@ static lv_obj_t *mask(const lv_image_dsc_t *image, int x, int y, uint32_t color)
 
 static void clear(uint32_t color)
 {
+    if (idle_timer) lv_timer_pause(idle_timer);
+    pip_sleep_stop();
     lv_obj_clean(scene);
     lv_obj_set_style_bg_color(scene, lv_color_hex(color), 0);
 }
@@ -92,6 +109,10 @@ static void face(const char *name)
     uint32_t color = !strcmp(name, "listening") ? 0xff472a : !strcmp(name, "attention") ? 0xffd900 : 0;
     clear(color);
     snprintf(state, sizeof(state), "%s", name);
+    if (!strcmp(name, "idle")) {
+        lv_timer_reset(idle_timer);
+        lv_timer_resume(idle_timer);
+    }
     if (!strcmp(name, "attention")) {
         mask(&pip_face_attention, 104, 64, 0);
     } else if (!strcmp(name, "thinking")) {
@@ -101,16 +122,13 @@ static void face(const char *name)
         mask(&pip_face_listening, 104, 64, 0xffffff);
         mask(&pip_ears, 331, 98, 0xffffff);
         mask(&pip_ears_left, 56, 98, 0xffffff);
+    } else if (!strcmp(name, "sleeping")) {
+        pip_sleep_start(scene);
     } else {
         mask(&pip_face_outline, 104, 64, 0xffffff);
-        if (!strcmp(name, "sleeping")) {
-            mask(&pip_eye_sleep, 163, 159, 0xffffff);
-            mask(&pip_eye_sleep, 239, 159, 0xffffff);
-        } else {
-            mask(&pip_eye_happy, 160, 140, 0xffffff);
-            mask(&pip_eye_happy, 236, 140, 0xffffff);
-            mask(&pip_smile, 178, 212, 0xffffff);
-        }
+        mask(&pip_eye_happy, 160, 140, 0xffffff);
+        mask(&pip_eye_happy, 236, 140, 0xffffff);
+        mask(&pip_smile, 178, 212, 0xffffff);
     }
 }
 
@@ -253,6 +271,7 @@ static void submit(unsigned index)
 
 static void tap(int x, int y)
 {
+    idle_activity();
     if (!strcmp(state, "attention") && pages) {
         cancel_attention();
         render_page();
@@ -282,6 +301,7 @@ static void tap(int x, int y)
 
 static void release(int x0, int y0, int x1, int y1)
 {
+    idle_activity();
     int dx = x1 - x0, dy = y1 - y0;
     if (abs(dx) >= 48 && abs(dx) > abs(dy)) navigate(dx < 0 ? 1 : -1);
     else if (abs(dx) < 24 && abs(dy) < 24) tap(x1, y1);
@@ -294,12 +314,16 @@ static void pointer_event(lv_event_t *event)
     lv_point_t point;
     lv_indev_get_point(input, &point);
     if (lv_event_get_code(event) == LV_EVENT_PRESSED) {
+        idle_activity();
         pressed = point;
         pointer_down = true;
     } else if (lv_event_get_code(event) == LV_EVENT_RELEASED && pointer_down) {
         pointer_down = false;
         release(pressed.x, pressed.y, point.x, point.y);
-    } else if (lv_event_get_code(event) == LV_EVENT_PRESS_LOST) pointer_down = false;
+    } else if (lv_event_get_code(event) == LV_EVENT_PRESS_LOST) {
+        pointer_down = false;
+        idle_activity();
+    }
 }
 
 void pip_ui_init(lv_display_t *display)
@@ -308,9 +332,13 @@ void pip_ui_init(lv_display_t *display)
     lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
     scene = box(screen, 0, 0, WIDTH, HEIGHT, 0, 56);
-    lv_obj_set_style_clip_corner(scene, true, 0);
+    // All children are inset within the rounded background. Clipping the
+    // children into the rounded corners adds unnecessary offscreen compositing.
     lv_obj_add_flag(scene, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(scene, pointer_event, LV_EVENT_ALL, NULL);
+    lv_obj_add_event_cb(scene, pointer_event, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(scene, pointer_event, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(scene, pointer_event, LV_EVENT_PRESS_LOST, NULL);
+    idle_timer = lv_timer_create(idle_elapsed, 10000, NULL);
     face("sleeping");
 }
 
@@ -375,7 +403,16 @@ void pip_ui_drag(int32_t x0, int32_t y0, int32_t x1, int32_t y1)
 void pip_ui_inspect(void)
 {
     if (!lvgl_port_lock(1000)) return;
-    printf("PIPEVENT {\"type\":\"ui\",\"state\":\"%s\",\"page\":%u,\"pages\":%u}\n",
+    printf("PIPEVENT {\"type\":\"ui\",\"state\":\"%s\",\"page\":%u,\"pages\":%u",
         state, page, pages);
+    if (!strcmp(state, "sleeping")) pip_sleep_inspect();
+    printf("}\n");
+    lvgl_port_unlock();
+}
+
+void pip_ui_sleep_debug(uint32_t repeat, int32_t seek_ms)
+{
+    if (!lvgl_port_lock(1000)) return;
+    if (!strcmp(state, "sleeping")) pip_sleep_debug(repeat != 0, seek_ms);
     lvgl_port_unlock();
 }

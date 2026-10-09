@@ -32,3 +32,5 @@ void pip_ui_drag(int32_t x0, int32_t y0, int32_t x1, int32_t y1);
 int32_t pip_legacy_card(const char *title, const char *body, const char *const *options, uint32_t count);
 uint32_t pip_legacy_choice(void);
 void pip_ui_inspect(void);
+
+void pip_ui_sleep_debug(uint32_t repeat, int32_t seek_ms);

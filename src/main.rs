@@ -116,6 +116,13 @@ impl App {
                     state(name);
                 }
             }
+            Some("sleep_animation") if self.card.is_none() => unsafe {
+                let repeat = message["repeat"].as_bool().unwrap_or(false);
+                let seek = message["seek_ms"]
+                    .as_i64()
+                    .filter(|v| (0..=9000).contains(v));
+                esp_idf_sys::pip_ui_sleep_debug(repeat as u32, seek.map_or(-1, |v| v as i32));
+            },
             Some("inspect") => unsafe { esp_idf_sys::pip_ui_inspect() },
             Some("tap") => {
                 if let (Some(x), Some(y)) = (message["x"].as_i64(), message["y"].as_i64()) {

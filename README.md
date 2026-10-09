@@ -77,7 +77,7 @@ The USB pins must remain available for flashing and recovery.
 
 PSRAM has different access and bandwidth constraints from internal SRAM. Keep
 DMA buffers, interrupt state and critical allocations internal. A full-screen
-transfer at a hypothetical 40 MHz QSPI takes at least 16.49 ms before overhead;
+transfer at the BSP's configured 40 MHz QSPI takes at least 16.49 ms before overhead;
 this is not a measured frame rate. Prefer small animations on black and avoid
 persistently bright static content. Runtime, battery life, cold-start behavior,
 and physical display/touch behavior still require on-device verification.
@@ -395,15 +395,45 @@ notice/error UI smoke test and all 18 host tests also passed. Hardware tests
 use simulated touch. The user also verified physical swipes, choice taps, and
 confirmation on the device.
 
-Known issue: the user observed visible tearing during screen redraws. Display
-transfer timing and panel synchronization still need investigation; the cause
-has not yet been confirmed.
+The user observed slow top-to-bottom redraws and tearing. Profiling found that
+the touch handler was subscribed to draw events as well as input events, causing
+repeated synchronous LVGL warnings during rendering. It now subscribes only to
+press/release/press-lost events. Redundant child corner clipping was removed
+(all current content is inset within the rounded background), and LVGL's C
+rasterizer is built with `-O2` rather than the default `-Os`.
+
+Measured full-screen face redraws dropped from 225–236 ms to 76–83 ms, with
+pixel-identical captures for all five faces. These are median LVGL refresh
+durations over three samples per state, including software rotation, screenshot
+buffer copies, and transfer submission/waits. The final asynchronous DMA
+completion may occur after the measured refresh ends. This is about a 3×
+improvement, not proof of 30 FPS animation or tear-free panel scanout. The
+current path still sends 15 partial strips per full redraw; transfer batching,
+rendering cost, and panel synchronization remain work for animated transitions.
+
+Reproduce the measurement with an empty device queue:
+
+```sh
+.tools/python/bin/python scripts/render-bench.py --output .tools/render-bench
+```
+
+The test cycles the face states, records timings, and captures each state.
+The separate sleep benchmark below measures sustained animated refreshes.
+The USB `render-stats` command reports the last nonempty refresh: `refresh_us`
+is elapsed time, `flush_us` is time in flush callbacks (including copies and
+rotation), `wait_us` is time waiting for a previous transfer, and `strips` and
+`pixels` describe the workload. It does not stream logging during rendering.
 
 Tapping sleeping/idle shows listening and emits a `listen_start` interaction;
-tapping again emits `listen_stop` and returns to idle. **This pass does not
-record microphone audio.** The >2-second/volume gate in the design awaits
-codec/microphone bring-up. The host can set thinking when real processing
-starts. There is no invented idle-to-sleep timeout or animation timing.
+tapping again emits `listen_stop` and returns to idle. Microphone recording
+is not implemented yet.
+
+Idle transitions to sleeping after 10 seconds without interaction.
+Entering idle starts a fresh timeout; touch activity resets it, and leaving
+idle cancels it. An incoming card therefore prevents sleep while it is being
+read. Holding a finger down also prevents sleep. Network heartbeats and
+diagnostic inspection do not count as user activity. Tapping sleeping still
+starts listening. This is a UI state transition, not MCU deep sleep.
 Interaction events are best-effort notifications; unlike card replies they
 are not retried. Their unique IDs let the host deduplicate received events.
 
@@ -420,6 +450,7 @@ curl --fail http://127.0.0.1:8788/cards \
 # Hardware smoke test: requires TCP connected and an empty queue.
 .tools/python/bin/python scripts/ui-smoke.py
 .tools/python/bin/python scripts/choices-smoke.py
+.tools/python/bin/python scripts/idle-smoke.py
 ```
 
 The hardware test generates and dismisses its own notice/error cards, checks
@@ -427,6 +458,8 @@ page boundaries and back navigation, verifies host replies, and saves CRC-
 validated screen captures under `.tools/v1/`. The choice test covers 1–3
 options, swipe boundaries, tentative-selection cancellation, and exactly one
 reply after confirmation, with captures under `.tools/choices/`.
+The idle test checks the 10-second timeout, activity reset, wake tap, and
+incoming-message interruption, with captures under `.tools/idle/`.
 USB JSON commands `inspect`, `tap`, and `drag` expose UI state and invoke the
 same navigation handler as physical touch. A drag has `x0`, `y0`, `x1`, `y1`;
 they are development tools, not evidence that the touch hardware was tapped.
@@ -752,3 +785,41 @@ References: [MCP Events](https://developers.openai.com/plugins/build/mcp-events)
 [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels),
 [MCP skill import](https://developers.openai.com/plugins/build/mcp-server), and
 [local skill discovery](https://learn.chatgpt.com/docs/build-skills).
+
+
+## Procedural sleep animation
+
+The sleeping scene is generated in `components/pip_board/pip_sleep.c`; no blob
+sprites or frame sequence are stored. An antialiased capsule and two closed-eye
+arcs are evaluated in rotating coordinates into a 128 × 104 RGB565 tile. The
+capsule stays on the bottom baseline while changing shape and rolling. The zZ
+strokes are generated once into two small tiles with staggered fades.
+
+The cycle is 1 second still, 4 seconds breathing, 1 second still, and 3 seconds
+of fading zZ. Each completed cycle has a 1-in-10 chance of a 3-second tumble to
+a different bottom position. The blob stays within the design's side margins.
+Taps and incoming cards stop the animation immediately. Still phases avoid
+redrawing the blob; animation positions use elapsed time rather than frame count.
+
+```sh
+# Capture reference poses, measure 12 seconds of continuous tumbling, restore normal sleep.
+.tools/python/bin/python scripts/sleep-bench.py
+# Leave the benchmark tumbling for visual inspection.
+.tools/python/bin/python scripts/sleep-bench.py --leave-running
+```
+
+USB debug commands (while sleeping):
+
+```json
+{"type":"sleep_animation","repeat":true}
+{"type":"sleep_animation","repeat":true,"seek_ms":750}
+{"type":"sleep_animation","repeat":false,"seek_ms":7500}
+{"type":"sleep_animation","repeat":false}
+```
+
+`seek_ms` freezes a pose for pixel inspection; omitting it resumes time. `inspect`
+includes phase, elapsed milliseconds, position, draw count, and rasterization
+time. This benchmark measured 28.6 nonempty LVGL refreshes/second, about 5.8 ms
+median refresh work, and approximately 7.5 ms procedural rasterization per
+moving frame. This measures submitted refreshes, not panel-synchronized scanout;
+TE/vsync synchronization and full-screen animated transitions remain future work.

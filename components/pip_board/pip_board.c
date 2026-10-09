@@ -27,6 +27,58 @@ static lv_display_t *ui_display;
 static esp_lcd_panel_io_handle_t panel_io;
 static uint16_t *screen_pixels;
 static uint32_t screen_flushes;
+typedef struct {
+    int64_t started, elapsed, wait_started, waited, flush_started, flushing;
+    uint32_t strips, pixels;
+} render_stats_t;
+static render_stats_t render_current, render_last;
+static uint32_t render_frames;
+
+static void measure_render(lv_event_t *event)
+{
+    int64_t now = esp_timer_get_time();
+    switch (lv_event_get_code(event)) {
+    case LV_EVENT_REFR_START:
+        render_current = (render_stats_t){.started = now};
+        break;
+    case LV_EVENT_FLUSH_START: {
+        const lv_area_t *area = lv_event_get_param(event);
+        render_current.strips++;
+        render_current.pixels += lv_area_get_size(area);
+        render_current.flush_started = now;
+        break;
+    }
+    case LV_EVENT_FLUSH_FINISH:
+        render_current.flushing += now - render_current.flush_started;
+        break;
+    case LV_EVENT_FLUSH_WAIT_START:
+        render_current.wait_started = now;
+        break;
+    case LV_EVENT_FLUSH_WAIT_FINISH:
+        render_current.waited += now - render_current.wait_started;
+        break;
+    case LV_EVENT_REFR_READY:
+        if (render_current.strips) {
+            render_current.elapsed = now - render_current.started;
+            render_last = render_current;
+            render_frames++;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void report_render(void)
+{
+    if (!lvgl_port_lock(1000)) return;
+    printf("PIPRENDER {\"frames\":%lu,\"refresh_us\":%lld,\"wait_us\":%lld,"
+        "\"flush_us\":%lld,\"strips\":%lu,\"pixels\":%lu}\n",
+        (unsigned long)render_frames, (long long)render_last.elapsed,
+        (long long)render_last.waited, (long long)render_last.flushing,
+        (unsigned long)render_last.strips, (unsigned long)render_last.pixels);
+    lvgl_port_unlock();
+}
 static lv_obj_t *choice_buttons[3];
 static atomic_uint choice;
 enum { UI_WIDTH = BSP_LCD_V_RES, UI_HEIGHT = BSP_LCD_H_RES };
@@ -145,6 +197,7 @@ int32_t pip_board_init(void)
     lv_display_t *display = lvgl_port_add_disp(&display_config);
     ESP_RETURN_ON_FALSE(display, ESP_ERR_NO_MEM, TAG, "display buffers");
     ui_display = display;
+    lv_display_add_event_cb(display, measure_render, LV_EVENT_ALL, NULL);
     screen_pixels = heap_caps_calloc(UI_WIDTH * UI_HEIGHT, sizeof(uint16_t),
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     ESP_RETURN_ON_FALSE(screen_pixels, ESP_ERR_NO_MEM, TAG, "screenshot buffer");
@@ -250,6 +303,8 @@ const char *pip_debug_poll(void)
                 send_screenshot();
             } else if (!overflow && strcmp(command, "panel") == 0) {
                 panel_report();
+            } else if (!overflow && strcmp(command, "render-stats") == 0) {
+                report_render();
             } else if (!overflow && length != 0) {
                 length = 0;
                 return command;
