@@ -48,3 +48,6 @@ uint32_t pip_audio_peak(void);
 void pip_ui_audio_finish(uint32_t generation);
 
 void pip_network_inspect(void);
+
+void pip_display_sleep(uint32_t sleeping);
+uint32_t pip_display_brightness(void);

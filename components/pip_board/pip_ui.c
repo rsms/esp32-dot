@@ -107,6 +107,7 @@ static lv_obj_t *text_at(lv_obj_t *parent, const char *text, int x, int cap_y, i
 
 static void face(const char *name)
 {
+    pip_display_sleep(!strcmp(name, "sleeping"));
     uint32_t color = !strcmp(name, "listening") ? 0xff472a : !strcmp(name, "attention") ? 0xffd900 : 0;
     clear(color);
     unsigned audio = atomic_load(&audio_state);

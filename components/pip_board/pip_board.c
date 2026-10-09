@@ -27,6 +27,21 @@ static lv_display_t *ui_display;
 static esp_lcd_panel_io_handle_t panel_io;
 static uint16_t *screen_pixels;
 static uint32_t screen_flushes;
+enum { CONFIGURED_BRIGHTNESS = 80, SLEEP_BRIGHTNESS = 20 };
+static uint32_t display_brightness = SLEEP_BRIGHTNESS;
+
+// Call while holding the LVGL lock; the panel I/O serializes commands with DMA.
+void pip_display_sleep(uint32_t sleeping)
+{
+    uint32_t percent = sleeping ? SLEEP_BRIGHTNESS : CONFIGURED_BRIGHTNESS;
+    if (percent == display_brightness) return;
+    esp_err_t result = bsp_display_brightness_set(percent);
+    if (result == ESP_OK) display_brightness = percent;
+    else ESP_LOGE(TAG, "Brightness update failed: %s", esp_err_to_name(result));
+}
+
+uint32_t pip_display_brightness(void) { return display_brightness; }
+
 typedef struct {
     int64_t started, elapsed, wait_started, waited, flush_started, flushing;
     uint32_t strips, pixels;
@@ -126,7 +141,7 @@ static esp_err_t panel_wake(void)
             0x02000000 | (settings[i][0] << 8), &settings[i][1], 1), TAG, "panel control");
     }
     ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(panel_io, 0x02002900, NULL, 0), TAG, "panel display on");
-    const uint8_t brightness = 204; // 80 percent.
+    const uint8_t brightness = 255 * SLEEP_BRIGHTNESS / 100;
     ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(panel_io, 0x02005100, &brightness, 1), TAG, "panel brightness");
     const uint8_t contrast = 0;
     ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(panel_io, 0x02005800, &contrast, 1), TAG, "panel contrast");
@@ -172,7 +187,7 @@ int32_t pip_board_init(void)
     // Explicitly restore native addressing after the panel has woken up.
     ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(panel, false), TAG, "native panel axes");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(panel, false, false), TAG, "native panel orientation");
-    ESP_RETURN_ON_ERROR(bsp_display_brightness_set(80), TAG, "brightness");
+    ESP_RETURN_ON_ERROR(bsp_display_brightness_set(SLEEP_BRIGHTNESS), TAG, "brightness");
 
     lvgl_port_cfg_t port_config = ESP_LVGL_PORT_INIT_CONFIG();
     port_config.task_stack = 6144;
