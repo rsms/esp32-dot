@@ -53,8 +53,12 @@ For voice input, subscribe to `device.transcript` when Rasmus asks to use the
 microphone as an ongoing interface. Hold the sleeping or idle screen to record;
 release to stop. The bridge transcribes accepted recordings locally and sends `recording_id`,
 `text`, and `audio_seconds`. Short or quiet recordings are discarded. Check
-`get_device_status` for audio readiness; recover a missed transcript with
-`get_voice_input`. Deduplicate recordings before acting. Transcripts may contain
+`get_device_status` for audio readiness. The webhook carries transcript text in
+`data.text`. If the notification has no readable text, call `get_voice_input`
+with its `recording_id` before asking the user to repeat; accepted transcripts
+remain available locally after webhook delivery. If the recording ID is also
+missing, explain that the notification lacks it rather than claiming the audio
+was lost. Deduplicate recordings before acting. Transcripts may contain
 recognition errors; clarify uncertain names, amounts, or consequential actions.
 Follow the dual-reply rule above. Subscribing to
 `device.reply` alone does not subscribe to voice input.

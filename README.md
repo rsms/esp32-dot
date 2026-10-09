@@ -784,6 +784,10 @@ If a particular transcript was accepted by the webhook but Dot has not answered,
 ask Dot to recover it with `get_voice_input` using its recording ID and respond
 both in chat and through `send_message`. Avoid replaying an already accepted webhook: it can cause
 duplicate handling without resolving a delayed cloud continuation.
+If Dot reports that a voice notification has no transcript, the webhook's text
+is under `data.text`. Ask it to call `get_voice_input` with the event's
+`recording_id` before asking you to record again. That tool retrieves the saved
+transcript even after successful webhook delivery.
 
 #### 8. Restart, diagnose, and package
 

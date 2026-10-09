@@ -114,6 +114,8 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(delivered), 1)
         self.assertEqual(delivered[0]['name'], 'device.transcript')
         self.assertEqual(delivered[0]['data']['recording_id'], 'voice-test')
+        self.assertEqual(delivered[0]['data']['text'], 'What is next?')
+        self.assertEqual(delivered[0]['data']['audio_seconds'], 3.2)
         result = await self.call('get_voice_input', {'recording_id': 'voice-test'})
         self.assertEqual(result['structuredContent']['text'], 'What is next?')
         await self.mcp.deliver_once()
