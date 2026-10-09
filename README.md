@@ -1057,3 +1057,41 @@ neural candidates produced more recognition mistakes than the raw recordings.
 The enclosure remains a possible source of muffling; an exposed-microphone recording
 is needed to separate acoustic loss from electronics and background noise.
 
+[whisper.cpp](https://github.com/ggml-org/whisper.cpp) provides a second local ASR
+benchmark. The setup pins its source revision and verifies model checksums. On macOS,
+it requires CMake and GNU make (`gmake`) and uses Metal acceleration by default.
+The model download is separate from inference; recordings remain on this computer.
+
+```sh
+.tools/python/bin/python scripts/setup-whisper.py --model large-v3-turbo-q8_0
+.tools/python/bin/python scripts/audio-benchmark.py <SESSION_DIRECTORY>/session.json \
+    --model .tools/whisper-models/ggml-large-v3-turbo-q8_0.bin \
+    --enhanced <ENHANCED_DIRECTORY>/manifest.json --output <NEW_REPORT.json>
+```
+
+`--enhanced` is optional. `base.en` and `small.en` are also supported by the installer.
+The benchmark starts a temporary loopback-only server, warms the model, measures
+complete requests, and stops the server afterward. Expected phrases are used only
+for scoring; they are never sent to the recognizer. It compares accepted recordings
+with the Phonon raw results saved during tuning.
+
+The October 2026 twelve-phrase experiment found:
+
+| Recognizer/input | Result compared with the spoken prompt | Median warm request |
+| --- | --- | --- |
+| Phonon/raw | Word mistakes in two phrases; also joined `for20` | Existing resident recognizer |
+| Whisper base.en/raw | More errors than Phonon | 32 ms |
+| Whisper small.en/raw | More errors than Phonon | 60 ms |
+| Whisper large-v3-turbo Q8/raw | All twelve match apart from punctuation/number formatting | 114 ms |
+| Whisper large-v3-turbo Q8/RNNoise | Word mistakes in two phrases | 115 ms |
+| Whisper large-v3-turbo Q8/DeepFilterNet | Word differences in three phrases | 117 ms |
+
+These timings exclude model loading, recording, device transport, and cloud delivery.
+The report deliberately retains the existing strict word scorer: it counts `20`
+versus `twenty`, `1/4 past 3` versus `quarter past three`, and `10:30` versus `ten thirty`
+as differences. Consequently its seven strict errors for raw Whisper turbo are all
+number formatting; that score alone would give the wrong ranking. Inspect transcripts
+alongside scores. Twelve familiar prompts are a small diagnostic set, not proof of
+accuracy on spontaneous speech or unfamiliar names. This benchmark does not switch
+the live recognizer from Phonon.
+
