@@ -42,6 +42,13 @@ only acknowledges the notice. Follow the user's authorization for any resulting
 action. If the original task context is missing, recover it or clarify before
 acting. Do not echo every dismissal back onto the display.
 
+When replying to a message received from the device, including a voice transcript
+or a choice reply, respond in both the regular chat and on the physical display.
+Use `send_message` for the device response, or `ask_question` when a choice is
+needed. The chat can include more detail; the device version should be concise
+and preserve the same answer or question. A chat-only response does not complete
+the reply. This rule does not require a response to a simple dismissal.
+
 For voice input, subscribe to `device.transcript` when Rasmus asks to use the
 microphone as an ongoing interface. Hold the sleeping or idle screen to record;
 release to stop. The bridge transcribes accepted recordings locally and sends `recording_id`,
@@ -49,5 +56,5 @@ release to stop. The bridge transcribes accepted recordings locally and sends `r
 `get_device_status` for audio readiness; recover a missed transcript with
 `get_voice_input`. Deduplicate recordings before acting. Transcripts may contain
 recognition errors; clarify uncertain names, amounts, or consequential actions.
-Reply through `send_message` or `ask_question` as appropriate. Subscribing to
+Follow the dual-reply rule above. Subscribing to
 `device.reply` alone does not subscribe to voice input.
