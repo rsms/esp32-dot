@@ -34,3 +34,5 @@ uint32_t pip_legacy_choice(void);
 void pip_ui_inspect(void);
 
 void pip_ui_sleep_debug(uint32_t repeat, int32_t seek_ms);
+
+void pip_network_inspect(void);

@@ -1,6 +1,8 @@
 #include "pip_board.h"
 #include <stdatomic.h>
 #include <string.h>
+#include <stdio.h>
+#include "esp_heap_caps.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -15,6 +17,7 @@ static atomic_bool connecting;
 static atomic_bool started;
 static atomic_uint retry_at;
 static atomic_uint generation;
+static atomic_uint lease_deadline;
 
 static void network_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -22,11 +25,15 @@ static void network_event(void *arg, esp_event_base_t base, int32_t id, void *da
     (void)data;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         atomic_store(&started, true);
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        atomic_store(&lease_deadline, (uint32_t)(esp_timer_get_time() / 1000) + 20000);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        atomic_store(&lease_deadline, 0);
         atomic_store(&connected, false);
         atomic_store(&connecting, false);
         atomic_store(&retry_at, (uint32_t)(esp_timer_get_time() / 1000) + 5000);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        atomic_store(&lease_deadline, 0);
         atomic_store(&connected, true);
         atomic_store(&connecting, false);
         ESP_LOGI(TAG, "Wi-Fi connected; host bridge available for connection");
@@ -118,6 +125,12 @@ int32_t pip_network_save(const char *ssid, const char *password, const pip_netwo
 void pip_network_poll(void)
 {
     uint32_t now = esp_timer_get_time() / 1000;
+    uint32_t deadline = atomic_load(&lease_deadline);
+    if (deadline && !atomic_load(&connected) && (int32_t)(now - deadline) >= 0) {
+        atomic_store(&lease_deadline, 0);
+        ESP_LOGW(TAG, "No DHCP lease after association; reconnecting");
+        esp_wifi_disconnect();
+    }
     if (atomic_load(&started) && !atomic_load(&connected) && !atomic_load(&connecting) &&
         (int32_t)(now - atomic_load(&retry_at)) >= 0) {
         atomic_store(&connecting, true);
@@ -146,3 +159,19 @@ int32_t pip_network_set_host(const char *host, uint16_t port)
 
 int32_t pip_network_ready(void) { return atomic_load(&connected); }
 uint32_t pip_network_generation(void) { return atomic_load(&generation); }
+
+void pip_network_inspect(void)
+{
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t ip = {0};
+    esp_netif_dhcp_status_t dhcp = ESP_NETIF_DHCP_INIT;
+    if (netif) {
+        esp_netif_get_ip_info(netif, &ip);
+        esp_netif_dhcpc_get_status(netif, &dhcp);
+    }
+    wifi_ap_record_t access_point = {0};
+    bool associated = esp_wifi_sta_get_ap_info(&access_point) == ESP_OK;
+    printf("PIPNETWORK {\"ready\":%d,\"has_ip\":%d,\"dhcp\":%d,\"dma_free\":%u,\"associated\":%d,\"rssi\":%d}\n",
+        (int)atomic_load(&connected), ip.ip.addr != 0, (int)dhcp,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA), associated, access_point.rssi);
+}

@@ -303,6 +303,8 @@ const char *pip_debug_poll(void)
                 send_screenshot();
             } else if (!overflow && strcmp(command, "panel") == 0) {
                 panel_report();
+            } else if (!overflow && strcmp(command, "network-stats") == 0) {
+                pip_network_inspect();
             } else if (!overflow && strcmp(command, "render-stats") == 0) {
                 report_render();
             } else if (!overflow && length != 0) {
