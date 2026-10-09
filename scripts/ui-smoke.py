@@ -57,6 +57,10 @@ def tap(stream, x, y=180):
     time.sleep(0.1)
 
 
+def pointer(stream, phase, x=224, y=180):
+    send(stream, {'type': 'pointer', 'phase': phase, 'x': x, 'y': y})
+
+
 def main():
     health = api('/health')
     assert health['connected'] and health['transport'] == 'tcp', health
@@ -72,9 +76,9 @@ def main():
             save_capture(stream, OUT / (state + '.png'))
         api('/state', {'state': 'sleeping'})
         wait_state(stream, 'sleeping')
-        tap(stream, 224)
+        pointer(stream, 1)
         wait_state(stream, 'listening')
-        tap(stream, 224)
+        pointer(stream, 0)
         wait_state(stream, 'idle')
         run = 'ui-smoke-' + uuid.uuid4().hex[:8]
         api('/cards', {'id': run, 'title': 'Message', 'body':
@@ -111,7 +115,7 @@ def main():
         assert len(choices) == 2 and all(e['option_id'] == 'dismiss' for e in choices), choices
         assert api('/health')['pending'] == 0
         save_capture(stream, OUT / 'idle-final.png')
-    print('PASS: face states, listen taps, page boundaries, back navigation, queue advancement, error dismissal, one reply per card')
+    print('PASS: face states, hold/release listening, page boundaries, back navigation, queue advancement, error dismissal, one reply per card')
 
 
 if __name__ == '__main__':

@@ -27,7 +27,10 @@ def main():
             request = urllib.request.Request("http://127.0.0.1:8789/mcp", line,
                 headers)
             with client.open(request, timeout=30) as response:
-                result = response.read(262144)
+                # A bounded 30-second mono WAV is ~1.28 MB after base64.
+                result = response.read(2 * 1024 * 1024 + 1)
+                if len(result) > 2 * 1024 * 1024:
+                    raise ValueError("Oversized MCP response")
             if result:
                 sys.stdout.buffer.write(result + b"\n")
                 sys.stdout.buffer.flush()

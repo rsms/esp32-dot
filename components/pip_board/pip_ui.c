@@ -10,6 +10,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+LV_FONT_DECLARE(inter_tune);
+LV_FONT_DECLARE(inter_tune_label);
+LV_FONT_DECLARE(inter_tune_retry);
+LV_FONT_DECLARE(inter_tune_exit);
+LV_FONT_DECLARE(inter_tune_check);
 LV_FONT_DECLARE(inter_55);
 LV_FONT_DECLARE(inter_28);
 LV_FONT_DECLARE(inter_40);
@@ -25,11 +30,20 @@ static char option_labels[3][65];
 static bool confirming;
 static lv_point_t pressed;
 static bool pointer_down;
+// Retain ownership through completion/cancellation so releasing a hold cannot
+// accidentally press a review button or start another recording.
+static bool recording_hold;
+static unsigned recording_hold_generation;
 static lv_timer_t *attention_timer;
 static lv_timer_t *idle_timer;
 static atomic_uint choice;
 static atomic_uint interaction;
 static atomic_uint audio_state;
+static atomic_bool audio_started;
+static lv_obj_t *tune_frame;
+static atomic_uint tune_action;
+static char tune_action_id[65];
+static char tune_id[65], tune_phrase[161];
 static char state[16] = "sleeping";
 static char content[664];
 static uint16_t offsets[168];
@@ -77,6 +91,7 @@ static void clear(uint32_t color)
 {
     if (idle_timer) lv_timer_pause(idle_timer);
     pip_sleep_stop();
+    tune_frame = NULL;
     lv_obj_clean(scene);
     lv_obj_set_style_bg_color(scene, lv_color_hex(color), 0);
 }
@@ -109,15 +124,44 @@ static void face(const char *name)
 {
     pip_display_sleep(!strcmp(name, "sleeping"));
     uint32_t color = !strcmp(name, "listening") ? 0xff472a : !strcmp(name, "attention") ? 0xffd900 : 0;
+    if (*tune_id) color = 0;
     clear(color);
     unsigned audio = atomic_load(&audio_state);
+    atomic_store(&audio_started, false);
     atomic_store(&audio_state, !strcmp(name, "listening") ? ((audio & ~3u) + 4) | 1 : audio & ~3u);
     snprintf(state, sizeof(state), "%s", name);
     if (!strcmp(name, "idle")) {
         lv_timer_reset(idle_timer);
         lv_timer_resume(idle_timer);
     }
-    if (!strcmp(name, "attention")) {
+    if (*tune_id) {
+        if (!strcmp(name, "tune_review") || !strcmp(name, "tune_wait")) {
+            box(scene, 24, 24, 188, 148, 0xffffff, 32);
+            box(scene, 24, 196, 188, 148, 0xffffff, 32);
+            box(scene, 236, 24, 188, 320, 0xffffff, 32);
+            lv_obj_t *label = text_at(scene, "Retry", 46, 112, 144, &inter_tune_label, 0);
+            lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+            label = text_at(scene, "Exit", 46, 284, 144, &inter_tune_label, 0);
+            lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+            label = text_at(scene, "Submit", 258, 198, 144, &inter_tune_label, 0);
+            lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+            label = text_at(scene, "↻", 86, 54, 64, &inter_tune_retry, 0);
+            lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+            label = text_at(scene, "×", 86, 221, 64, &inter_tune_exit, 0);
+            lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+            label = text_at(scene, "✓", 298, 112, 64, &inter_tune_check, 0);
+            lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        } else {
+            lv_obj_t *label = text_at(scene, tune_phrase, 40, 40, 368, &inter_tune, 0xffffff);
+            lv_obj_set_style_text_line_space(label, 48 - inter_tune.line_height, 0);
+            // Figma's exported frame includes the recording dot. Its 242x202
+            // design-pixel bounds extend 9 px beyond each edge of the scene.
+            if (!strcmp(name, "listening")) {
+                tune_frame = mask(&pip_recording_frame, -18, -18, 0xff472a);
+                lv_obj_add_flag(tune_frame, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    } else if (!strcmp(name, "attention")) {
         mask(&pip_face_attention, 104, 64, 0);
     } else if (!strcmp(name, "thinking")) {
         mask(&pip_face_thinking, 104, 64, 0xffffff);
@@ -199,6 +243,7 @@ static void option_text(const char *text)
 
 static void render_page(void)
 {
+    pip_display_sleep(0);
     uint32_t color = error_card ? RED : BLUE;
     clear(color);
     snprintf(state, sizeof(state), "message");
@@ -276,7 +321,26 @@ static void submit(unsigned index)
 static void tap(int x, int y)
 {
     idle_activity();
-    if (!strcmp(state, "attention") && pages) {
+    if (*tune_id && !strcmp(state, "tune_review")) {
+        unsigned action = 0;
+        if (x >= 24 && x < 212 && y >= 24 && y < 172) action = 1;
+        else if (x >= 24 && x < 212 && y >= 196 && y < 344) action = 2;
+        else if (x >= 236 && x < 424 && y >= 24 && y < 344) action = 3;
+        if (action) {
+            snprintf(tune_action_id, sizeof(tune_action_id), "%s", tune_id);
+            atomic_store(&tune_action, action);
+            if (action == 2) { *tune_id = 0; face("idle"); }
+            else snprintf(state, sizeof(state), "tune_wait");
+        }
+    } else if (*tune_id && !strcmp(state, "tuning")) {
+        face("listening");
+        atomic_store(&interaction, 1);
+    } else if (*tune_id && !strcmp(state, "listening")) {
+        unsigned audio = atomic_load(&audio_state);
+        face("thinking");
+        atomic_store(&audio_state, (audio & ~3u) | 2);
+        atomic_store(&interaction, 2);
+    } else if (!strcmp(state, "attention") && pages) {
         cancel_attention();
         render_page();
     } else if (showing_card() && !submitted) {
@@ -294,14 +358,6 @@ static void tap(int x, int y)
         } else if (x < 128 && page) navigate(-1);
         else if (x >= 320) navigate(1);
         else if (!option_count && page == pages && x >= 130 && x < 320) submit(0);
-    } else if (!strcmp(state, "sleeping") || !strcmp(state, "idle")) {
-        face("listening");
-        atomic_store(&interaction, 1);
-    } else if (!strcmp(state, "listening")) {
-        unsigned audio = atomic_load(&audio_state);
-        face("thinking");
-        atomic_store(&audio_state, (audio & ~3u) | 2);
-        atomic_store(&interaction, 2);
     }
 }
 
@@ -313,6 +369,39 @@ static void release(int x0, int y0, int x1, int y1)
     else if (abs(dx) < 24 && abs(dy) < 24) tap(x1, y1);
 }
 
+static void pointer_press(int x, int y)
+{
+    if (pointer_down) return;
+    idle_activity();
+    pressed = (lv_point_t){x, y};
+    pointer_down = true;
+    if (!strcmp(state, "sleeping") || !strcmp(state, "idle")) {
+        recording_hold = true;
+        face("listening");
+        recording_hold_generation = atomic_load(&audio_state) & ~3u;
+        atomic_store(&interaction, 1);
+    }
+}
+
+static void pointer_release(int x, int y, bool lost)
+{
+    if (!pointer_down) return;
+    pointer_down = false;
+    idle_activity();
+    if (recording_hold) {
+        recording_hold = false;
+        // Even a moved/lost touch ends recording. Never interpret this release
+        // as navigation or a button click on the newly displayed review page.
+        if (atomic_load(&audio_state) == (recording_hold_generation | 1)) {
+            face("thinking");
+            atomic_store(&audio_state, recording_hold_generation | 2);
+            atomic_store(&interaction, 2);
+        }
+    } else if (!lost) {
+        release(pressed.x, pressed.y, x, y);
+    }
+}
+
 static void pointer_event(lv_event_t *event)
 {
     lv_indev_t *input = lv_event_get_indev(event);
@@ -320,15 +409,11 @@ static void pointer_event(lv_event_t *event)
     lv_point_t point;
     lv_indev_get_point(input, &point);
     if (lv_event_get_code(event) == LV_EVENT_PRESSED) {
-        idle_activity();
-        pressed = point;
-        pointer_down = true;
-    } else if (lv_event_get_code(event) == LV_EVENT_RELEASED && pointer_down) {
-        pointer_down = false;
-        release(pressed.x, pressed.y, point.x, point.y);
+        pointer_press(point.x, point.y);
+    } else if (lv_event_get_code(event) == LV_EVENT_RELEASED) {
+        pointer_release(point.x, point.y, false);
     } else if (lv_event_get_code(event) == LV_EVENT_PRESS_LOST) {
-        pointer_down = false;
-        idle_activity();
+        pointer_release(point.x, point.y, true);
     }
 }
 
@@ -354,6 +439,7 @@ int32_t pip_ui_state(const char *name)
         strcmp(name, "listening") && strcmp(name, "attention")) return ESP_ERR_INVALID_ARG;
     if (!lvgl_port_lock(1000)) return ESP_ERR_TIMEOUT;
     cancel_attention();
+    *tune_id = 0;
     face(name);
     lvgl_port_unlock();
     return ESP_OK;
@@ -365,6 +451,7 @@ int32_t pip_ui_card(const char *title, const char *body, const char *const *labe
     if (!title || !body || !labels || count < 1 || count > 3) return ESP_ERR_INVALID_ARG;
     if (!lvgl_port_lock(1000)) return ESP_ERR_TIMEOUT;
     cancel_attention();
+    *tune_id = 0;
     snprintf(content, sizeof(content), "%s%s%s", title, *title ? "\n" : "", body);
     option_count = kind == 1 ? count : 0;
     for (unsigned i = 0; i < option_count; i++) snprintf(option_labels[i], sizeof(option_labels[i]), "%s", labels[i]);
@@ -394,7 +481,8 @@ uint32_t pip_ui_interaction(void) { return atomic_exchange(&interaction, 0); }
 void pip_ui_tap(int32_t x, int32_t y)
 {
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT || !lvgl_port_lock(1000)) return;
-    tap(x, y);
+    pointer_press(x, y);
+    pointer_release(x, y, false);
     lvgl_port_unlock();
 }
 
@@ -402,7 +490,16 @@ void pip_ui_drag(int32_t x0, int32_t y0, int32_t x1, int32_t y1)
 {
     if (x0 < 0 || x0 >= WIDTH || x1 < 0 || x1 >= WIDTH ||
         y0 < 0 || y0 >= HEIGHT || y1 < 0 || y1 >= HEIGHT || !lvgl_port_lock(1000)) return;
-    release(x0, y0, x1, y1);
+    pointer_press(x0, y0);
+    pointer_release(x1, y1, false);
+    lvgl_port_unlock();
+}
+
+void pip_ui_pointer(int32_t x, int32_t y, uint32_t phase)
+{
+    if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT || phase > 2 || !lvgl_port_lock(1000)) return;
+    if (phase == 1) pointer_press(x, y);
+    else pointer_release(x, y, phase == 2);
     lvgl_port_unlock();
 }
 
@@ -412,8 +509,10 @@ void pip_ui_inspect(void)
     printf("PIPEVENT {\"type\":\"ui\",\"state\":\"%s\",\"page\":%u,\"pages\":%u",
         state, page, pages);
     if (!strcmp(state, "sleeping")) pip_sleep_inspect();
-    printf(",\"audio\":{\"state\":%u,\"samples\":%u,\"peak\":%u}}\n",
-        atomic_load(&audio_state), (unsigned)pip_audio_samples(), (unsigned)pip_audio_peak());
+    printf(",\"brightness\":%u,\"tuning\":%s", (unsigned)pip_display_brightness(), *tune_id ? "true" : "false");
+    printf(",\"audio\":{\"state\":%u,\"started\":%s,\"samples\":%u,\"peak\":%u}}\n",
+        atomic_load(&audio_state), atomic_load(&audio_started) ? "true" : "false",
+        (unsigned)pip_audio_samples(), (unsigned)pip_audio_peak());
     lvgl_port_unlock();
 }
 
@@ -426,12 +525,12 @@ void pip_ui_sleep_debug(uint32_t repeat, int32_t seek_ms)
 
 uint32_t pip_ui_audio_state(void) { return atomic_load(&audio_state); }
 
-void pip_ui_audio_complete(uint32_t generation)
+void pip_ui_audio_complete(uint32_t generation, uint32_t success)
 {
     if (!lvgl_port_lock(1000)) return;
     unsigned audio = atomic_load(&audio_state);
     if ((audio & ~3u) == generation && (audio & 3) != 0 &&
-        (!strcmp(state, "thinking") || !strcmp(state, "listening"))) face("idle");
+        (!strcmp(state, "thinking") || !strcmp(state, "listening"))) face(*tune_id ? (success ? "tune_review" : "tuning") : "idle");
     lvgl_port_unlock();
 }
 
@@ -443,4 +542,45 @@ void pip_ui_audio_finish(uint32_t generation)
         atomic_store(&audio_state, generation | 2);
     }
     lvgl_port_unlock();
+}
+
+int32_t pip_ui_tune(const char *id, const char *phrase)
+{
+    if (!id || !phrase || strlen(id) > 64 || strlen(phrase) > 160) return ESP_ERR_INVALID_ARG;
+    if (!lvgl_port_lock(1000)) return ESP_ERR_TIMEOUT;
+    if (!*id && !*tune_id) { lvgl_port_unlock(); return ESP_OK; }
+    cancel_attention();
+    snprintf(tune_id, sizeof(tune_id), "%s", id);
+    snprintf(tune_phrase, sizeof(tune_phrase), "%s", phrase);
+    face(*tune_id ? "tuning" : "idle");
+    lvgl_port_unlock();
+    return ESP_OK;
+}
+
+void pip_ui_audio_tuning(char *id, uint32_t capacity)
+{
+    if (!capacity) return;
+    *id = 0;
+    if (!lvgl_port_lock(1000)) return;
+    snprintf(id, capacity, "%s", tune_id);
+    lvgl_port_unlock();
+}
+
+void pip_ui_audio_started(uint32_t generation)
+{
+    if (!lvgl_port_lock(1000)) return;
+    if (atomic_load(&audio_state) == (generation | 1)) {
+        atomic_store(&audio_started, true);
+        if (tune_frame) lv_obj_remove_flag(tune_frame, LV_OBJ_FLAG_HIDDEN);
+    }
+    lvgl_port_unlock();
+}
+
+uint32_t pip_ui_tune_action(char *id, uint32_t capacity)
+{
+    if (!capacity || !lvgl_port_lock(1000)) return 0;
+    uint32_t action = atomic_exchange(&tune_action, 0);
+    snprintf(id, capacity, "%s", tune_action_id);
+    lvgl_port_unlock();
+    return action;
 }

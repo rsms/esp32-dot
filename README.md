@@ -425,8 +425,8 @@ is elapsed time, `flush_us` is time in flush callbacks (including copies and
 rotation), `wait_us` is time waiting for a previous transfer, and `strips` and
 `pixels` describe the workload. It does not stream logging during rendering.
 
-Tapping sleeping/idle starts microphone recording and shows listening; tapping
-again stops recording and shows thinking while the host gates/transcribes it.
+Holding sleeping/idle starts microphone recording and shows listening; releasing
+stops recording and shows thinking while the host gates/transcribes it.
 Short or quiet recordings return to idle without a transcript. See **Local
 voice input** below for setup and limits.
 
@@ -434,7 +434,7 @@ Idle transitions to sleeping after 10 seconds without interaction.
 Entering idle starts a fresh timeout; touch activity resets it, and leaving
 idle cancels it. An incoming card therefore prevents sleep while it is being
 read. Holding a finger down also prevents sleep. Network heartbeats and
-diagnostic inspection do not count as user activity. Tapping sleeping still
+diagnostic inspection do not count as user activity. Holding sleeping still
 starts listening. This is a UI state transition, not MCU deep sleep.
 Interaction events are best-effort notifications; unlike card replies they
 are not retried. Their unique IDs let the host deduplicate received events.
@@ -551,7 +551,8 @@ subscriptions after a bridge restart.
 Acknowledged card replies generate `device.reply`. Accepted microphone recordings
 generate `device.transcript` after local recognition. These are separate
 subscriptions; adding the new event requires rescanning an existing cloud plugin.
-`get_voice_input(recording_id)` recovers persisted text. Raw audio is not retained.
+`get_voice_input(recording_id)` recovers persisted text. Normal voice input does
+not retain raw audio; the explicit voice-tuning mode below keeps local WAVs.
 
 ### Setup: device, local bridge, and ChatGPT Dot
 
@@ -769,8 +770,8 @@ uv pip install --python .tools/mcp-test-python/bin/python mcp==2.3.0
 Host tests cover durable replies and webhook retries across restarts, filtering,
 verification failures, signing, credential rotation, idempotency, cancellation,
 priority ordering, HTTP authentication, and blocked callback destinations.
-All 24 host tests pass, including audio gates, streaming protocol, and transcript
-events. The official SDK test passes modern and legacy
+All 32 host tests pass, including audio gates, streaming protocol, transcript
+events, tuning isolation, WAV preservation, and preprocessing validation. The official SDK test passes modern and legacy
 discovery, tools, and resources over both stdio and HTTP.
 The hardware test passed on the device after one transient USB inspection
 timeout. It sends requests through MCP/TCP, cancels a question, navigates
@@ -803,7 +804,7 @@ strokes are generated once into two small tiles with staggered fades.
 The cycle is 1 second still, 4 seconds breathing, 1 second still, and 3 seconds
 of fading zZ. Each completed cycle has a 1-in-10 chance of a 3-second tumble to
 a different bottom position. The blob stays within the design's side margins.
-Taps and incoming cards stop the animation immediately. Still phases avoid
+Touch presses and incoming cards stop the animation immediately. Still phases avoid
 redrawing the blob; animation positions use elapsed time rather than frame count.
 
 ```sh
@@ -838,7 +839,8 @@ card/reply socket remain independent. The `.local` hostname is resolved while
 idle by the control connection and its address is reused for audio. Wi-Fi
 association without a DHCP lease is retried after 20 seconds.
 
-Tap the sleeping or idle face to start, then tap again to stop. Recording also
+Hold the sleeping or idle face to record, then release to stop. Losing touch
+contact also stops recording. Recording also
 stops after 30 seconds. An incoming card or host state change cancels it. A stale
 recognition result cannot replace a newer screen or recording. The speaker is
 not used. Microphone samples are never printed to USB.
@@ -906,3 +908,98 @@ start/stop taps, and the automatic 30.0-second cap. After testing, the device is
 connected over TCP and the local model is ready; no recording is left active.
 The USB `network-stats` command reports DHCP state, association, RSSI, and free
 DMA memory without exposing provisioning credentials.
+
+
+## Voice tuning
+
+The device presents a phrase, keeps it visible while recording, then shows
+Retry, Exit, and Submit. Retry returns to the same phrase ready for another tap; Submit accepts
+the take and advances; Exit stops tuning. A local script starts and stops the mode; audio
+capture uses the device microphone, so measurements include the enclosure and
+normal speaking distance. The screen follows Figma group `5:99`: 40 px Inter Medium text, 48 px line
+spacing, the original red frame/dot asset, and the three white action buttons.
+Tap the phrase screen to start and tap again to stop; this keeps your hand out
+of the way while reading. Retry returns to the same phrase and waits for a tap.
+The main sleeping/idle experience still uses hold-to-record and release-to-stop.
+The frame and dot appear only once the first PCM packet has
+been sent, indicating that the microphone is ready.
+
+```sh
+.tools/python/bin/python scripts/voice-tune.py
+# Tap to record, wait for the red frame, speak, tap to stop.
+# Choose Retry, Exit, or Submit. Ctrl-C also stops.
+# Alternatively, keep it running without a terminal monitor:
+.tools/python/bin/python scripts/voice-tune.py start --detach
+.tools/python/bin/python scripts/voice-tune.py status
+.tools/python/bin/python scripts/voice-tune.py stop
+```
+
+Provide `start --phrases phrases.txt` to use 8–100 distinct phrases, one per
+line, each at most 160 UTF-8 bytes, using printable ASCII or the curly apostrophe
+`’`. Phrases repeat until stopped, a message interrupts, or the connection is
+re-established. Restarting the bridge does not resume a tuning session.
+
+Each submitted sample is saved under `.tools/voice-tuning/session-*/` as a mono,
+16 kHz, 16-bit `0001-raw.wav`. Unlike normal voice input, tuning intentionally
+retains the original WAV, even for short/quiet submissions, so it can be listened
+to. `session.json` preserves the reference, transcript variants, timing, signal
+levels, clipping fraction, DC offset, and word-error scores. Files are local,
+ignored by Git, and remain until deleted. Cancelled/incomplete streams are not
+retained. Tuning does not produce `device.transcript` events or execute phrases.
+
+Accepted samples are compared using original PCM, an 80 Hz high-pass filter
+(removes DC and low-frequency rumble), and the high-pass filter with quiet edge
+trimming (preserves 250 ms of context). Each processed WAV is also saved. These
+are candidates to measure, not assumptions about what improves the microphone.
+Reference phrases are never passed to Phonon. The score ignores punctuation and
+case but counts substitutions, insertions, and deletions. Only explicitly
+submitted takes count toward calibration. Retried and abandoned takes remain
+available as WAVs but are excluded from scores. Retry and Submit messages are
+retried until the device receives the resulting state; duplicates cannot accept
+a sample twice or advance twice.
+
+Every fourth distinct phrase is reserved for validation. A candidate is selected
+using practice phrases; applying it requires at least three distinct practice
+phrases and two distinct validation phrases, lower aggregate error on both, and
+no individual validation recording that is worse than the original. Nothing is
+applied automatically. These small-sample checks are a starting point, not proof
+of general accuracy.
+
+```sh
+.tools/python/bin/python scripts/voice-tune.py apply  # Only a validated improvement
+.tools/python/bin/python scripts/voice-tune.py reset  # Original PCM again
+```
+
+The selected preprocessing profile persists in `.tools/voice-tuning/profile.json`
+and affects subsequent normal voice input. Model weights are unchanged. The
+[pinned Phonon package](https://github.com/fermionresearch/phonon-coreml/tree/1.1.2)
+provides inference and a compiled decoder, with no supported LoRA/fine-tuning API.
+The retained WAV/reference pairs provide a dataset for evaluating other filters,
+microphone settings, or a future trainable recognizer. Automatic word replacement
+is not enabled: changing valid words can conceal microphone or recognition errors.
+
+The authenticated MCP server also exposes `list_voice_recordings` and
+`get_voice_recording(recording_id, variant?, format?)`. A recording ID looks like
+`session-012345abcdef:0001`. The default is a 32 kbps mono MP3 (`audio/mpeg`);
+`format: "wav"` returns the original PCM container. MP3 conversion uses FFmpeg
+from PATH or `/opt/homebrew/bin/ffmpeg`. Only retained tuning samples are readable;
+there is no arbitrary file-path tool. The tool returns MCP audio content without
+the reference phrase or Phonon result, allowing a blind listening/transcription
+comparison. Retrieving audio through the cloud plugin transfers that selected
+sample to its caller; collection itself does not upload it.
+
+Rescan the plugin to discover these tools. Dot's ability to consume MCP audio
+content still needs an end-to-end test; tool discovery alone does not prove that
+it hears the audio. WAV files can also be played locally or attached manually.
+
+```sh
+# Requires an empty queue; records a short microphone sample and exits tuning.
+.tools/python/bin/python scripts/tuning-smoke.py
+```
+
+Hardware checks passed for sleeping at 20%, restoration to 80%, the 10-second
+idle transition, phrase display, main hold/release recording, tuning tap recording, short presses,
+the recording frame, WAV retention, review tap boundaries,
+Retry, Submit, and Exit. Device screenshots were compared with the three Figma
+reference frames. A quiet-room sample was correctly kept for inspection while
+skipping recognition. See the listening-comparison results below.

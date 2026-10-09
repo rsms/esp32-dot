@@ -33,7 +33,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def message(self, reader):
         while True:
             message = json.loads(await asyncio.wait_for(reader.readline(), 1))
-            if message["type"] != "sync":
+            if message["type"] not in ("sync", "voice_tune"):
                 return message
 
     async def test_queue_reconnect_and_exactly_one_choice_event(self):

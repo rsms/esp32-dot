@@ -71,6 +71,8 @@ class Bridge:
     async def deliver(self):
         card = self.current()
         if self.peer and card:
+            if self.audio:
+                await self.audio.tuning.stop()
             await self.peer.send(card["message"])
 
     async def synchronize(self):
@@ -131,6 +133,9 @@ class Bridge:
         kind = message.get("type")
         if kind == "ping":
             await peer.send({"type": "pong"})
+        elif kind == "tune_action" and self.audio:
+            prompt_id = display_text(message.get("id"), 64, "tuning prompt id")
+            await self.audio.tuning.device_action(prompt_id, message.get("action"))
         elif kind == "interaction" and message.get("action") in ("listen_start", "listen_stop"):
             event_id = display_text(message.get("id"), 64, "interaction id")
             if not any(e.get("id") == event_id for e in self.state["events"]):
@@ -163,6 +168,10 @@ class Bridge:
         if self.peer:
             await self.peer.close()
         self.peer = peer
+        if self.audio:
+            await self.audio.tuning.stop(notify=False)
+        # Clear a stale calibration prompt after bridge restart or reconnect.
+        await peer.send({"type": "voice_tune", "id": "", "phrase": ""})
         await self.synchronize()
 
     async def tcp_client(self, reader, writer):
@@ -210,6 +219,8 @@ class Bridge:
                     raise ValueError("Dismiss pending cards before changing the companion state")
                 if not self.peer:
                     raise ConnectionError("Device disconnected")
+                if self.audio:
+                    await self.audio.tuning.stop(notify=False)
                 await self.peer.send({"type": "state", "state": state})
                 result = {"state": state, "sent": True}
             elif method == "POST" and url.path == "/cards":
@@ -218,6 +229,8 @@ class Bridge:
                 result = self.state["cards"]
             elif method == "GET" and url.path == "/audio":
                 result = self.audio.status() if self.audio else {"ready": False}
+            elif url.path == "/voice-tune" and self.audio and method in ("GET", "POST"):
+                result = self.audio.tuning.status() if method == "GET" else await self.audio.tuning.command(json.loads(data))
             elif method == "GET" and url.path == "/events":
                 after = int(parse_qs(url.query).get("after", ["0"])[0])
                 result = [e for e in self.state["events"] if e["seq"] > after]

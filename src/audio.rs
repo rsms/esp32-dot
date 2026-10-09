@@ -45,11 +45,14 @@ fn record(generation: u32, endpoint: &Endpoint) -> std::io::Result<()> {
     let id = format!("voice-{}-{generation}", unsafe {
         esp_idf_sys::esp_timer_get_time()
     });
+    let mut tuning = [0 as std::ffi::c_char; 65];
+    unsafe { esp_idf_sys::pip_ui_audio_tuning(tuning.as_mut_ptr(), tuning.len() as u32) };
+    let tuning = unsafe { CStr::from_ptr(tuning.as_ptr()) }.to_string_lossy();
     writeln!(
         stream,
         "{}",
         json!({"type":"audio", "version":1, "token":token,
-        "id":id, "sample_rate":16000, "channels":1, "format":"s16le"})
+        "id":id, "tuning_id":tuning, "sample_rate":16000, "channels":1, "format":"s16le"})
     )?;
     let mut reader = BufReader::new(stream);
     let mut response = String::new();
@@ -63,7 +66,7 @@ fn record(generation: u32, endpoint: &Endpoint) -> std::io::Result<()> {
     }
     if unsafe { esp_idf_sys::pip_ui_audio_state() } != (generation | 1) {
         reader.get_mut().write_all(&u16::MAX.to_be_bytes())?;
-        return Ok(());
+        return Err(std::io::ErrorKind::Interrupted.into());
     }
     let codec = unsafe { esp_idf_sys::pip_audio_open() };
     if codec != 0 {
@@ -71,8 +74,8 @@ fn record(generation: u32, endpoint: &Endpoint) -> std::io::Result<()> {
         return Err(std::io::ErrorKind::Other.into());
     }
     let result: std::io::Result<()> = (|| {
-        let began = Instant::now();
         let mut samples = [0i16; 320];
+        let began = Instant::now();
         let mut blocks = 0;
         let mut packet = [0u8; 642];
         packet[..2].copy_from_slice(&640u16.to_be_bytes());
@@ -89,6 +92,9 @@ fn record(generation: u32, endpoint: &Endpoint) -> std::io::Result<()> {
                 bytes.copy_from_slice(&sample.to_le_bytes());
             }
             reader.get_mut().write_all(&packet)?;
+            if blocks == 0 {
+                unsafe { esp_idf_sys::pip_ui_audio_started(generation) };
+            }
             blocks += 1;
         }
         let status = unsafe { esp_idf_sys::pip_ui_audio_state() };
@@ -167,7 +173,7 @@ pub fn run() {
         let generation = state & !3;
         if state & 3 == 2 && generation != previous {
             previous = generation;
-            unsafe { esp_idf_sys::pip_ui_audio_complete(generation) };
+            unsafe { esp_idf_sys::pip_ui_audio_complete(generation, 0) };
         }
         if state & 3 == 1 && generation != previous {
             previous = generation;
@@ -175,11 +181,16 @@ pub fn run() {
                 .as_ref()
                 .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotConnected))
                 .and_then(|endpoint| record(generation, endpoint));
+            let success = result.is_ok();
             if let Err(error) = result {
-                println!("pip: audio unavailable or interrupted ({:?})", error.kind());
-                cached = None;
+                // Releasing before the microphone opens is a normal gesture,
+                // not an endpoint failure. Keep the cache for the next hold.
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    println!("pip: audio unavailable or interrupted ({:?})", error.kind());
+                    cached = None;
+                }
             }
-            unsafe { esp_idf_sys::pip_ui_audio_complete(generation) };
+            unsafe { esp_idf_sys::pip_ui_audio_complete(generation, success as u32) };
         }
         thread::sleep(Duration::from_millis(10));
     }

@@ -33,3 +33,16 @@ an implementation asset. Rebuild with:
 
 Generated assets and font C files are checked in; normal firmware builds
 need neither Figma nor the asset conversion dependencies.
+
+
+Audio tuning was approved in the 18:34 screenshot, group `5:99`: ready `5:23`,
+recording `5:46`, and review `5:63`. Phrase text is Medium 20 px, optical size 14,
+line height 24 px, cap-trimmed at (20,20), width 184. The recording frame and dot
+are the original SVG `962877912cb75d4c1261f5d702ca54234f78bb22.svg`, 242×202,
+positioned at (-9,-9) and clipped by the screen. Color is #ff472a.
+
+Review buttons: Retry (12,12,94,74), Exit (12,98,94,74), Submit (118,12,94,160),
+radius 16. Labels are Medium 22 px, optical size 32. Retry uses ↻ at 22 px
+ExtraBold, Exit uses × at 30 px SemiBold, both with `case` enabled; Submit uses
+a 44 px Medium checkmark at optical size 14. All dimensions render at 2×. Rebuild tuning
+type with `scripts/tuning-fonts.py`; other screens' existing fonts are unchanged.

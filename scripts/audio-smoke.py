@@ -33,7 +33,7 @@ def main():
         try:
             ui.send(stream, {'type': 'state', 'state': 'sleeping'})
             ui.wait_state(stream, 'sleeping')
-            ui.tap(stream, 224)
+            ui.pointer(stream, 1)
             ui.wait_state(stream, 'listening')
             if args.play_file:
                 time.sleep(.2)
@@ -44,7 +44,7 @@ def main():
             capture = ui.inspect(stream)
             print('device:', json.dumps(capture), flush=True)
             assert capture['state'] == 'listening' and capture['audio']['samples'] > args.seconds * 8000
-            ui.tap(stream, 224)
+            ui.pointer(stream, 0)
             deadline = time.monotonic() + 50
             while time.monotonic() < deadline:
                 state = ui.inspect(stream)
@@ -57,6 +57,7 @@ def main():
             assert result['last']['status'] in ('discarded', 'empty', 'transcribed'), result
             Path('.tools/audio-smoke.json').write_text(json.dumps({'device': capture, 'host': result}, indent=4) + '\n')
         finally:
+            ui.pointer(stream, 2)
             ui.send(stream, {'type': 'state', 'state': 'sleeping'})
 
 

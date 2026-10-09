@@ -7,6 +7,7 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = {
+    'recording_frame': ('962877912cb75d4c1261f5d702ca54234f78bb22', 484, 404),
     'page_empty': ('04bb89831753fefa490c2f5f42e7fa18d712ad66', 24, 24),
     'page_full': ('69a5999be30457036893feb0a4bb60e1406463ba', 24, 24),
     'face_outline': ('003ab956bf84be3ebc5e3433bdf6100f2c43cc32', 240, 240),
@@ -24,7 +25,8 @@ def main():
     header = ['#pragma once', '#include "lvgl.h"']
     for name, (asset, width, height) in ASSETS.items():
         png = subprocess.check_output(['node', str(ROOT / 'scripts/render-svg.cjs'),
-            str(ROOT / 'assets/figma' / (asset + '.svg')), str(width)])
+            str(ROOT / 'assets/figma' / (asset + '.svg')), str(width),
+            'recording-frame' if name == 'recording_frame' else ''])
         bitmap = Image.open(io.BytesIO(png)).convert('RGBA').resize((width, height))
         data = bitmap.getchannel('A').tobytes()
         assert len(data) == width * height

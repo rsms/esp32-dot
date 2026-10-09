@@ -93,6 +93,9 @@ struct App {
     card: Option<Card>,
     pending: Option<Value>,
     last_reply: Instant,
+    tuning_id: String,
+    tuning_pending: Option<Value>,
+    tuning_sent: Instant,
 }
 
 impl App {
@@ -117,6 +120,34 @@ impl App {
                     state(name);
                 }
             }
+            Some("voice_tune") if self.card.is_none() => {
+                if let (Some(id), Some(phrase)) =
+                    (message["id"].as_str(), message["phrase"].as_str())
+                {
+                    if (id.is_empty() || display_text(id, 64))
+                        && phrase.len() <= 160
+                        && phrase
+                            .chars()
+                            .all(|c| c.is_ascii_graphic() || c == ' ' || c == '’')
+                    {
+                        if self
+                            .tuning_pending
+                            .as_ref()
+                            .is_some_and(|pending| pending["id"].as_str() != Some(id))
+                        {
+                            self.tuning_pending = None;
+                        }
+                        if id != self.tuning_id {
+                            self.tuning_id = id.into();
+                            let id = CString::new(id).unwrap();
+                            let phrase = CString::new(phrase).unwrap();
+                            unsafe {
+                                esp_idf_sys::pip_ui_tune(id.as_ptr(), phrase.as_ptr());
+                            }
+                        }
+                    }
+                }
+            }
             Some("sleep_animation") if self.card.is_none() => unsafe {
                 let repeat = message["repeat"].as_bool().unwrap_or(false);
                 let seek = message["seek_ms"]
@@ -129,6 +160,17 @@ impl App {
                 if let (Some(x), Some(y)) = (message["x"].as_i64(), message["y"].as_i64()) {
                     if (0..448).contains(&x) && (0..368).contains(&y) {
                         unsafe { esp_idf_sys::pip_ui_tap(x as i32, y as i32) };
+                    }
+                }
+            }
+            Some("pointer") => {
+                if let (Some(x), Some(y), Some(phase)) = (
+                    message["x"].as_i64(),
+                    message["y"].as_i64(),
+                    message["phase"].as_u64(),
+                ) {
+                    if (0..448).contains(&x) && (0..368).contains(&y) && phase <= 2 {
+                        unsafe { esp_idf_sys::pip_ui_pointer(x as i32, y as i32, phase as u32) };
                     }
                 }
             }
@@ -173,6 +215,8 @@ impl App {
                         return;
                     }
                     if self.pending.is_none() && card.show().is_ok() {
+                        self.tuning_pending = None;
+                        self.tuning_id.clear();
                         self.card = Some(card);
                     }
                 }
@@ -222,6 +266,9 @@ fn main() {
         card: None,
         pending: None,
         last_reply: Instant::now(),
+        tuning_id: String::new(),
+        tuning_pending: None,
+        tuning_sent: Instant::now(),
     };
     let mut interaction_seq = 0_u32;
     loop {
@@ -253,6 +300,20 @@ fn main() {
                 println!("PIPEVENT {line}");
                 let _ = outgoing.try_send(line);
                 app.last_reply = Instant::now();
+            }
+        }
+        let mut tune_id = [0 as std::ffi::c_char; 65];
+        let tune_action = unsafe { esp_idf_sys::pip_ui_tune_action(tune_id.as_mut_ptr(), 65) };
+        if (1..=3).contains(&tune_action) {
+            let id = unsafe { CStr::from_ptr(tune_id.as_ptr()) }.to_string_lossy();
+            let action = ["retry", "exit", "submit"][(tune_action - 1) as usize];
+            app.tuning_pending = Some(json!({"type":"tune_action", "id":id, "action":action}));
+            app.tuning_sent = Instant::now() - Duration::from_secs(3);
+        }
+        if app.tuning_sent.elapsed() >= Duration::from_secs(3) {
+            if let Some(message) = &app.tuning_pending {
+                let _ = outgoing.try_send(message.to_string());
+                app.tuning_sent = Instant::now();
             }
         }
         let interaction = unsafe { esp_idf_sys::pip_ui_interaction() };

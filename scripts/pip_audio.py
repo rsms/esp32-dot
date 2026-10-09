@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import wave
+from pip_tuning import VoiceTuning, preprocess
 
 ROOT = Path(__file__).resolve().parent.parent
 RATE = 16000
@@ -26,6 +27,8 @@ class Recording:
         self.max_rms = 0
         self.threshold = threshold
         self.levels = []
+        self.clipped = 0
+        self.dc_sum = 0
 
     def append(self, data):
         if len(data) != BLOCK * 2 or len(self.pcm) + len(data) > MAX_SAMPLES * 2:
@@ -40,6 +43,8 @@ class Recording:
         # Ignore initial codec/tap transient; require sustained significant levels.
         if len(self.pcm) >= RATE // 5:
             self.levels.append(rms)
+            self.clipped += sum(abs(s) >= 32112 for s in samples)
+            self.dc_sum += mean
             if rms >= self.threshold:
                 self.voiced += BLOCK
         self.pcm.extend(data)
@@ -48,6 +53,8 @@ class Recording:
         levels = sorted(self.levels) or [0]
         return {'seconds': len(self.pcm) / (RATE * 2), 'voiced_seconds': self.voiced / RATE,
             'peak': self.peak, 'max_rms': self.max_rms,
+            'clipped_fraction': self.clipped / max(1, len(self.levels) * BLOCK),
+            'dc_offset': self.dc_sum / max(1, len(self.levels)) / 32768,
             'rms_p50': levels[len(levels) // 2], 'rms_p95': levels[int((len(levels) - 1) * .95)]}
 
     def accepted(self):
@@ -133,15 +140,17 @@ class AudioService:
         self.active = False
         self.stage = "idle"
         self.last = None
+        self.tuning = VoiceTuning(bridge, ROOT / ".tools/voice-tuning")
 
     def status(self):
         return {'ready': self.worker.ready, 'recording': self.stage == 'recording',
             'busy': self.active, 'stage': self.stage,
-            'error': self.worker.error, 'last': self.last}
+            'error': self.worker.error, 'last': self.last, 'preprocessing': self.tuning.profile, 'tuning': self.tuning.active}
 
     async def client(self, reader, writer):
         owns_session = False
         recording = None
+        tuning_context = None
         async def reply(value):
             writer.write(json.dumps(value, separators=(',', ':')).encode() + b'\n')
             await writer.drain()
@@ -158,6 +167,9 @@ class AudioService:
             if self.active or not self.worker.ready:
                 await reply({'error': 'Audio service unavailable or busy'})
                 return
+            tuning_id = hello.get('tuning_id', '')
+            if tuning_id or self.tuning.active:
+                tuning_context = self.tuning.capture_context(tuning_id)
             self.active = owns_session = True
             self.stage = "recording"
             recording = Recording(self.threshold)
@@ -175,13 +187,20 @@ class AudioService:
                     first_packet = time.monotonic() - started
                 recording.append(packet)
             summary = dict(recording.summary(), id=request_id, first_packet_seconds=first_packet)
+            if tuning_context and size != 65535:
+                self.stage = "transcribing"
+                summary['status'] = 'tuning'
+                await self.tuning.capture(tuning_context, recording, summary, self.worker)
+                self.last = summary
+                await reply(summary)
+                return
             if size == 65535 or not recording.accepted():
                 summary['status'] = 'cancelled' if size == 65535 else 'discarded'
                 self.last = summary
                 await reply(summary)
                 return
             self.stage = "transcribing"
-            result = await self.worker.transcribe(request_id, recording.pcm)
+            result = await self.worker.transcribe(request_id, preprocess(recording.pcm, self.tuning.profile))
             text = result['text'].strip()
             summary.update(status='transcribed' if text else 'empty',
                 transcribe_seconds=result['transcribe_seconds'])
@@ -197,9 +216,10 @@ class AudioService:
             self.last = summary
             await reply(summary)
         except (ValueError, KeyError, TypeError, AttributeError, OSError, RuntimeError,
-                asyncio.IncompleteReadError, asyncio.LimitOverrunError, asyncio.TimeoutError):
+                asyncio.IncompleteReadError, asyncio.LimitOverrunError, asyncio.TimeoutError) as error:
             if owns_session:
-                self.last = {'status': 'failed'}
+                self.last = {'status':'failed', 'stage':self.stage, 'error':type(error).__name__,
+                    'seconds':recording.summary()['seconds'] if recording else 0}
             try:
                 await reply({'error': 'Audio stream interrupted or transcription unavailable'})
             except (ConnectionError, OSError):

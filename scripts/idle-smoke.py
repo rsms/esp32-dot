@@ -54,12 +54,12 @@ def main():
         await_sleep(stream, started)
         save_capture(stream, output / 'sleeping.png')
 
-        # Tapping sleeping still starts listening; idle's old timer cannot fire.
-        ui.tap(stream, 224)
+        # Holding sleeping starts listening; idle's old timer cannot fire.
+        ui.pointer(stream, 1)
         ui.wait_state(stream, 'listening')
         time.sleep(10.5)
         expect(stream, 'listening')
-        ui.tap(stream, 224)
+        ui.pointer(stream, 0)
         ui.wait_state(stream, 'idle')
 
         # A drag that leaves the face idle still counts as activity.

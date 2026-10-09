@@ -1,5 +1,6 @@
 #pragma once
 #include "lvgl.h"
+extern const lv_image_dsc_t pip_recording_frame;
 extern const lv_image_dsc_t pip_page_empty;
 extern const lv_image_dsc_t pip_page_full;
 extern const lv_image_dsc_t pip_face_outline;

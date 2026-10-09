@@ -43,8 +43,8 @@ action. If the original task context is missing, recover it or clarify before
 acting. Do not echo every dismissal back onto the display.
 
 For voice input, subscribe to `device.transcript` when Rasmus asks to use the
-microphone as an ongoing interface. A tap starts recording; the next tap ends
-it. The bridge transcribes accepted recordings locally and sends `recording_id`,
+microphone as an ongoing interface. Hold the sleeping or idle screen to record;
+release to stop. The bridge transcribes accepted recordings locally and sends `recording_id`,
 `text`, and `audio_seconds`. Short or quiet recordings are discarded. Check
 `get_device_status` for audio readiness; recover a missed transcript with
 `get_voice_input`. Deduplicate recordings before acting. Transcripts may contain
