@@ -72,7 +72,7 @@ Our two native-width 32-row DMA buffers total 47,104 bytes (46 KiB), allocated
 internally. Software rotation adds one 23,552-byte scratch buffer, for 69 KiB
 total pixel buffers. LVGL redraws dirty rectangles. Updates must start on even coordinates and cover
 even pixel counts. AMOLED brightness is a panel command, not a PWM backlight. Startup brightness
-is 100% (requested by the user).
+is 80%.
 The USB pins must remain available for flashing and recovery.
 
 PSRAM has different access and bandwidth constraints from internal SRAM. Keep

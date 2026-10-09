@@ -126,7 +126,7 @@ static esp_err_t panel_wake(void)
             0x02000000 | (settings[i][0] << 8), &settings[i][1], 1), TAG, "panel control");
     }
     ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(panel_io, 0x02002900, NULL, 0), TAG, "panel display on");
-    const uint8_t brightness = 255; // 100 percent.
+    const uint8_t brightness = 204; // 80 percent.
     ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(panel_io, 0x02005100, &brightness, 1), TAG, "panel brightness");
     const uint8_t contrast = 0;
     ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(panel_io, 0x02005800, &contrast, 1), TAG, "panel contrast");
@@ -172,7 +172,7 @@ int32_t pip_board_init(void)
     // Explicitly restore native addressing after the panel has woken up.
     ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(panel, false), TAG, "native panel axes");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(panel, false, false), TAG, "native panel orientation");
-    ESP_RETURN_ON_ERROR(bsp_display_brightness_set(100), TAG, "brightness");
+    ESP_RETURN_ON_ERROR(bsp_display_brightness_set(80), TAG, "brightness");
 
     lvgl_port_cfg_t port_config = ESP_LVGL_PORT_INIT_CONFIG();
     port_config.task_stack = 6144;
