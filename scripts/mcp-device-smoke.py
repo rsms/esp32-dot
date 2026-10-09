@@ -45,10 +45,12 @@ def main():
         try:
             call('ask_question', {'request_id': prefix + '-cancel', 'text': 'Temporary MCP test',
                 'options': [{'id': 'ok', 'label': 'OK'}]})
-            ui.wait_state(stream, 'message')
+            ui.wait_state(stream, 'attention')
             call('cancel_request', {'request_id': prefix + '-cancel'})
             ui.wait_state(stream, 'idle')
             call('send_message', {'request_id': prefix, 'text': 'Hello from pip MCP.'})
+            ui.wait_state(stream, 'attention')
+            ui.tap(stream, 224)
             state = ui.wait_state(stream, 'message')
             save_capture(stream, output / 'message.png')
             for _ in range(state['pages']):

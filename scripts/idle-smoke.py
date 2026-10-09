@@ -76,6 +76,8 @@ def main():
         time.sleep(2)
         rid = 'idle-smoke-' + uuid.uuid4().hex[:8]
         ui.api('/cards', {'id': rid, 'body': 'Incoming message prevents idle sleep.'})
+        ui.wait_state(stream, 'attention')
+        ui.tap(stream, 224)
         message = ui.wait_state(stream, 'message')
         time.sleep(10.5)
         expect(stream, 'message')

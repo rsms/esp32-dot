@@ -40,6 +40,8 @@ def main():
                     'text': 'Question\ncan also wrap multiple lines and always ends with a few choices',
                     'options': [{'id': str(i), 'label': label} for i, label in enumerate(labels[:count])]})
                 created.append(rid)
+                ui.wait_state(stream, 'attention')
+                ui.tap(stream, 224)
                 initial = ui.wait_state(stream, 'message')
                 assert initial['pages'] == 2, initial
                 drag(stream, -1)

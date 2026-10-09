@@ -83,6 +83,10 @@ def main():
         run = 'ui-smoke-' + uuid.uuid4().hex[:8]
         api('/cards', {'id': run, 'title': 'Message', 'body':
             'here which can wrap multiple lines, and when it does wrap multiple lines, it paginates until the last page.'})
+        wait_state(stream, 'attention')
+        time.sleep(1.5)
+        assert inspect(stream)['state'] == 'attention'
+        tap(stream, 224)
         initial = wait_state(stream, 'message')
         assert initial['page'] == 0 and initial['pages'] >= 2, initial
         for x in (20, 224):
@@ -102,6 +106,8 @@ def main():
         # Queue advancement and error styling share the acknowledged reply path.
         api('/cards', {'id': run + '-error', 'kind': 'error', 'body':
             'Error: description starts here and may span multiple pages and ends with dismissal'})
+        tap(stream, 224)
+        wait_state(stream, 'attention')
         tap(stream, 224)
         error = wait_state(stream, 'message')
         save_capture(stream, OUT / 'error.png')

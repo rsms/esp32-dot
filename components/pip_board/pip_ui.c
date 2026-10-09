@@ -34,7 +34,7 @@ static bool pointer_down;
 // accidentally press a review button or start another recording.
 static bool recording_hold;
 static unsigned recording_hold_generation;
-static lv_timer_t *attention_timer;
+static bool attention_pressed;
 static lv_timer_t *idle_timer;
 static atomic_uint choice;
 static atomic_uint interaction;
@@ -281,21 +281,6 @@ static void render_page(void)
     indicators(color);
 }
 
-static void attention_done(lv_timer_t *timer)
-{
-    (void)timer;
-    attention_timer = NULL;
-    render_page();
-}
-
-static void cancel_attention(void)
-{
-    if (attention_timer) {
-        lv_timer_delete(attention_timer);
-        attention_timer = NULL;
-    }
-}
-
 static bool showing_card(void)
 {
     return !strcmp(state, "message") || !strcmp(state, "choice") || !strcmp(state, "confirm");
@@ -341,7 +326,6 @@ static void tap(int x, int y)
         atomic_store(&audio_state, (audio & ~3u) | 2);
         atomic_store(&interaction, 2);
     } else if (!strcmp(state, "attention") && pages) {
-        cancel_attention();
         render_page();
     } else if (showing_card() && !submitted) {
         if (option_count && page >= pages) {
@@ -375,6 +359,7 @@ static void pointer_press(int x, int y)
     idle_activity();
     pressed = (lv_point_t){x, y};
     pointer_down = true;
+    attention_pressed = !strcmp(state, "attention");
     if (!strcmp(state, "sleeping") || !strcmp(state, "idle")) {
         recording_hold = true;
         face("listening");
@@ -397,7 +382,7 @@ static void pointer_release(int x, int y, bool lost)
             atomic_store(&audio_state, recording_hold_generation | 2);
             atomic_store(&interaction, 2);
         }
-    } else if (!lost) {
+    } else if (!lost && (strcmp(state, "attention") || attention_pressed)) {
         release(pressed.x, pressed.y, x, y);
     }
 }
@@ -438,7 +423,6 @@ int32_t pip_ui_state(const char *name)
     if (strcmp(name, "sleeping") && strcmp(name, "idle") && strcmp(name, "thinking") &&
         strcmp(name, "listening") && strcmp(name, "attention")) return ESP_ERR_INVALID_ARG;
     if (!lvgl_port_lock(1000)) return ESP_ERR_TIMEOUT;
-    cancel_attention();
     *tune_id = 0;
     face(name);
     lvgl_port_unlock();
@@ -450,7 +434,6 @@ int32_t pip_ui_card(const char *title, const char *body, const char *const *labe
 {
     if (!title || !body || !labels || count < 1 || count > 3) return ESP_ERR_INVALID_ARG;
     if (!lvgl_port_lock(1000)) return ESP_ERR_TIMEOUT;
-    cancel_attention();
     *tune_id = 0;
     snprintf(content, sizeof(content), "%s%s%s", title, *title ? "\n" : "", body);
     option_count = kind == 1 ? count : 0;
@@ -469,8 +452,8 @@ int32_t pip_ui_card(const char *title, const char *body, const char *const *labe
     submitted = false;
     atomic_store(&choice, 0);
     face("attention");
-    attention_timer = lv_timer_create(attention_done, 900, NULL);
-    lv_timer_set_repeat_count(attention_timer, 1);
+    // A touch already in progress belongs to the previous screen/card.
+    attention_pressed = false;
     lvgl_port_unlock();
     return ESP_OK;
 }
@@ -549,7 +532,6 @@ int32_t pip_ui_tune(const char *id, const char *phrase)
     if (!id || !phrase || strlen(id) > 64 || strlen(phrase) > 160) return ESP_ERR_INVALID_ARG;
     if (!lvgl_port_lock(1000)) return ESP_ERR_TIMEOUT;
     if (!*id && !*tune_id) { lvgl_port_unlock(); return ESP_OK; }
-    cancel_attention();
     snprintf(tune_id, sizeof(tune_id), "%s", id);
     snprintf(tune_phrase, sizeof(tune_phrase), "%s", phrase);
     face(*tune_id ? "tuning" : "idle");

@@ -371,7 +371,8 @@ Messages wrap using LVGL's own font metrics into four-line pages. An optional
 Left/right 128 px strips navigate. The last text page advances to a checkmark
 screen; its center region dismisses. Message dots exclude the dismissal page,
 matching Figma. Long messages show a sliding window of up to nine dots.
-A new card shows attention for 900 ms (tap skips ahead). Dismissal retains the
+A new card stays on the yellow attention screen until a fresh tap. A touch that
+began before the card arrived cannot open it on release. Dismissal retains the
 existing retry/ACK protocol; an acknowledged card advances the host queue or
 returns to idle. `kind: "error"` uses the same flow in #a44200.
 
