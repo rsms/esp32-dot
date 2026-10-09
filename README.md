@@ -1,603 +1,114 @@
 # esp32-dot
 
-Native Rust firmware for Dot's physical interface, using ESP-IDF and LVGL.
-Currently targets the Waveshare ESP32-S3-Touch-AMOLED-1.8.
-ESP-IDF provides FreeRTOS and hardware drivers; LVGL draws the controls.
-The initial hello-world has evolved into the Figma v1 companion faces and
-paginated messages in Inter Variable. See the v1 section below for behavior.
+A small physical interface for ChatGPT Dot: a touchscreen companion that can show
+messages, ask you to choose between options, and send your voice messages to Dot.
+It sits on your desk, animates while sleeping, and asks for attention when there
+is something to read or answer.
 
-This is a local display and card prototype. A host bridge pushes notices and decisions to Dot and receives replies over
-Wi-Fi/TCP at `<MAC_HOSTNAME>.local:8787`. USB remains available for flashing and captures.
-The bridge now exposes MCP tools and signed reply events for ChatGPT Dot. Local
-MCP and hardware round trips are tested; cloud connection requires the account's
-Secure MCP Tunnel and plugin setup below. No ChatGPT credentials go on the device.
+The device runs native Rust firmware with ESP-IDF/FreeRTOS and an LVGL interface
+using Inter. A bridge on your computer handles the message queue, local speech
+recognition, and MCP connection to Dot. The ESP32 does not run a language model.
 
-esp32-dot was designed by rsms and built in collaboration with ChatGPT.
+Designed by rsms and built in collaboration with ChatGPT.
 
-## Five directions
+## What it does
 
-1. **Desk companion.** Dot lives as a responsive dot. A tap reveals a short
-   status; a second tap opens the relevant detail on the Mac. Start with a
-   USB bridge and explicit idle/working/needs-attention states.
-2. **Focus companion.** One intention and a timer ring. Tap to start/pause;
-   Dot quietly marks completion. The timer can work entirely on-device.
-3. **Pocket inbox.** One short card at a time from Dot. Swipe to acknowledge,
-   defer, or open on the Mac. Cache a small bounded inbox for offline use.
-4. **Voice pebble.** Hold to speak, release to send. The dot becomes a listening
-   animation, then a short caption and spoken response. Requires audio bring-up
-   and a host/network bridge; the board does not run a language model locally.
-5. **Daily instrument.** An unobtrusive clock that reveals the next event or
-   useful prompt when picked up. The IMU provides the gesture, the RTC the clock;
-   synchronized content would come from the host.
+- **Messages:** a yellow attention screen waits for a tap, then shows paginated
+  text. Swipe or tap the side regions to navigate; confirm the final checkmark
+  to dismiss.
+- **Questions:** read the question, browse up to three choices, tap one, then
+  confirm it. The selected option goes back to Dot.
+- **Voice:** hold the sleeping or idle screen to talk, then release to send.
+  Your computer transcribes the recording locally with Whisper turbo. Dot can
+  reply in chat and on the display.
+- **Sleep:** after 10 seconds of idle time, an animated sleeping character
+  appears and brightness drops from 80% to 20%. Interaction restores brightness.
+- **Development:** capture the actual rendered pixels over USB, exercise the
+  interface with simulated touch, and benchmark redraws and animations.
 
-These are interaction directions. The implemented interface and integration
-status, including local microphone transcription, are described below.
+This is an experimental project. Cloud replies can be delayed, full-screen
+updates are not yet synchronized to the panel's refresh, and speaker output is
+not implemented. The display currently supports printable ASCII and newlines.
 
-## Hardware and constraints
+## How it works
 
-Recorded 2026-10-08 so development does not depend on `_archive/`.
+```mermaid
+flowchart LR
+    Dot[ChatGPT Dot] <-->|MCP tools| Tunnel[Secure MCP Tunnel]
+    Tunnel <--> Bridge[Local Python bridge]
+    Bridge -->|Signed webhook events| Dot
+    Bridge <-->|Wi-Fi / TCP| Device[ESP32 touchscreen]
+    Device -->|Streaming microphone audio| Bridge
+    Bridge <-->|Local transcription| Whisper[Whisper turbo]
+    Agent[Local coding agent] <-->|MCP over stdio| Bridge
+```
 
-| Item | Specification / observation |
-| --- | --- |
-| Board | Waveshare ESP32-S3-Touch-AMOLED-1.8 (from supplied project notes) |
-| MCU | USB ROM query confirms ESP32-S3, QFN56 revision 0.2, dual Xtensa LX7, up to 240 MHz |
-| Internal SRAM | 512 KiB total; code, RTOS, driver state and stacks consume part of it |
-| PSRAM | ROM reports embedded 8 MiB, AP 3.3 V; octal, configured at 80 MHz |
-| Flash | ROM detects 16 MiB, manufacturer 0x20, device 0x4018, quad 3.3 V |
-| Security | ROM reports secure boot and flash encryption disabled |
-| USB | Native USB Serial/JTAG; observed `/dev/cu.usbmodem21401`; detect after reconnect |
-| Screen | Native 368 × 448 AMOLED, QSPI; mounted sideways in the enclosure, so UI is 448 × 368 landscape |
-| V1 panel/touch | SH8601 / FT3168, no horizontal gap |
-| V2 panel/touch | CO5300 / CST820, 16-pixel horizontal gap |
-| Other hardware | AXP2101 PMIC, PCF85063 RTC, QMI8658 IMU, ES8311 mic/speaker, microSD, Wi-Fi/BLE |
+The bridge owns the durable queue, transcripts, and replies. The device renders
+cards and returns stable option IDs; actions such as sending an email remain
+Dot's responsibility. Replies are saved before acknowledgement and deduplicated
+on retry. Queued requests survive bridge restarts.
 
-The touch probe identifies the display variant before panel creation. Neither
-controller responding is an error, not a reason to assume V1. The first firmware
-boot detected the **V2 path**, address 0x15, controller ID 0xb7. Driver-family names FT5x06/CST816S
-in the BSP refer to the compatible drivers, not necessarily the fitted chip name.
+The local MCP connection works without a cloud tunnel. To use the device from
+Dot in ChatGPT—including when chatting from another computer or phone—keep the
+bridge computer awake, online, and connected to the tunnel.
 
-| Signal | GPIO |
-| --- | --- |
-| Display CLK / CS | 11 / 12 |
-| Display D0 / D1 / D2 / D3 | 4 / 5 / 6 / 7 |
-| Shared I2C SDA / SCL | 15 / 14 |
-| Touch interrupt | 21 |
-| Native USB D− / D+ | 19 / 20 |
-| microSD CMD / CLK / D0 | 1 / 2 / 3 |
-| Audio SCLK / MCLK / LRCLK | 9 / 16 / 45 |
-| Audio DOUT / DIN / amplifier enable | 8 / 10 / 46 |
+## What you need
 
-There is no desktop GPU. One RGB565 frame is 329,728 bytes (322 KiB).
-Our two native-width 32-row DMA buffers total 47,104 bytes (46 KiB), allocated
-internally. Software rotation adds one 23,552-byte scratch buffer, for 69 KiB
-total pixel buffers. LVGL redraws dirty rectangles. Updates must start on even coordinates and cover
-even pixel counts. AMOLED brightness is a panel command, not a PWM backlight. Configured brightness
-is 80%; the sleeping animation uses 20%. Every transition out of sleeping
-restores the configured brightness, including taps and incoming messages.
-The USB pins must remain available for flashing and recovery.
+- A **Waveshare ESP32-S3-Touch-AMOLED-1.8**, with a USB data cable. The firmware
+  detects its V1/V2 display variants; development has used V2.
+- A **Mac**, with Apple Silicon being the tested host for local recognition.
+  The service installer uses macOS launchd. Other hosts need additional setup.
+- A **2.4 GHz Wi-Fi network** shared by the Mac and device, permitting local
+  connections and mDNS (`.local` hostnames).
+- Git, Rust/Cargo with a stable toolchain, [uv](https://docs.astral.sh/uv/),
+  Node.js/npm, CMake, Ninja, and GNU make (`gmake` on macOS).
+- For cloud integration, a ChatGPT workspace with Dot, custom MCP plugins, and
+  Secure MCP Tunnel access, plus the corresponding Platform permissions.
 
-PSRAM has different access and bandwidth constraints from internal SRAM. Keep
-DMA buffers, interrupt state and critical allocations internal. A full-screen
-transfer at the BSP's configured 40 MHz QSPI takes at least 16.49 ms before overhead;
-this is not a measured frame rate. Prefer small animations on black and avoid
-persistently bright static content. Runtime, battery life, cold-start behavior,
-and physical display/touch behavior still require on-device verification.
+The application and protocol can be adapted to other boards. **Sharing Xtensa
+and FreeRTOS is not enough to run this firmware unchanged:** display, touch,
+audio, power, memory, and pin assignments need board support. See
+[hardware and porting](docs/hardware.md).
 
-The BSP example does not explicitly initialize all PMIC rails. Do not invent
-voltage settings: validate an actual power-off/on and consult the board schematic
-if cold-start fails. No SD, audio, radio, charger, or eFuse configuration is needed
-for this first UI.
+## Build and flash
 
-### Enclosure orientation
-
-The panel is mounted 90° clockwise relative to the upright enclosure. Enable
-`sw_rotate` in the LVGL display port and set `LV_DISPLAY_ROTATION_90`. In the
-pinned port this maps logical pixels counterclockwise into native panel memory.
-The logical UI becomes 448 × 368. Keep touch coordinates in native panel space:
-LVGL's input processing automatically applies the inverse display transform.
-Do not rotate touch a second time in the driver. Center controls using LVGL
-alignment rather than hard-coded portrait coordinates.
-
-The V2 panel needs the complete Waveshare Arduino reset sequence. After BSP
-creation, reset it again, wait **200 ms**, send sleep-out, wait **120 ms**, then
-program its controls/pixel format, display-on and brightness, and wait 10 ms.
-The BSP/driver's 80 ms reset delay and programming-before-wake ordering produced
-blank physical screens despite correct LVGL captures. The earlier 30 ms delay
-and repeated display-on were insufficient. Replaying the V2 reference sequence
-restored the physical display, confirmed by the user and a background camera
-capture. Genuine cold power-on still needs testing. The override applies only
-to the probed V2 board; the existing V1 startup remains separate.
-
-For physical visual verification, the user provides a live camera preview in
-QuickTime Player. Capture that window rather than treating a framebuffer dump
-as proof of what the panel displays. **Never activate QuickTime or send keyboard
-or mouse input**: the user is working on the same computer. The screenshot
-helper's `--app` capture option activates the application. Instead, list windows
-with `--list-windows --app 'QuickTime Player'`, then capture using only
-`--window-id ID --mode temp`; that path does not activate the window.
-
-## Build layout
-
-- `src/main.rs`: Rust app, semantic cards, state commands and acknowledged choices.
-- `src/network.rs`: bounded JSON-lines TCP client, reconnects and heartbeats.
-- `components/pip_board/`: C17 hardware/LVGL bridge, screenshot and Wi-Fi setup.
-- `assets/fonts/InterVariable.ttf`: original variable font, supplied by its author.
-- `components/pip_board/inter_*.c`: generated ASCII glyphs, 20/28/40 px, weight 450,
-  optical size 32, 4-bit coverage. The v1 message font adds 55 px at weight 500,
-  optical size 27.5, plus a separate 88 px checkmark glyph. Font axes are instantiated at build time;
-  this initial renderer does not vary font weight at runtime.
-- `sdkconfig.defaults`: 16 MiB flash, octal PSRAM, USB console, 240 MHz CPU.
-
-Pinned starting stack: Rust `esp-1.97.0.0`, `esp-idf-sys` 0.38.1, ESP-IDF 5.5.5,
-Waveshare BSP 2.0.3, `esp_lvgl_port` 2.6.2, LVGL 9.2.2. Keep `Cargo.lock` and
-the generated `components_esp32s3.lock` in version control.
+Run the following from your checkout. Install the pinned Xtensa Rust toolchain
+with [espup](https://github.com/esp-rs/espup); upstream Rust alone cannot build
+this target:
 
 ```sh
-# First-time local helper installation (requires cargo, uv, node/npm).
-sh scripts/bootstrap.sh
+cargo +stable install espup --locked
+espup install --name esp-1.97.0.0 --toolchain-version 1.97.0.0 --targets esp32s3
+. "$HOME/export-esp.sh"
 
-sh scripts/build.sh
+sh scripts/bootstrap.sh
+sh scripts/build.sh --locked
 .tools/python/bin/python scripts/device.py info
 .tools/python/bin/python scripts/device.py flash
+```
+
+Flashing replaces the device's firmware and partition table. The helper selects
+the sole connected Espressif USB device; use `--port <SERIAL_PORT>` if several
+are connected. It checks the image fits the 4 MiB application partition before
+writing. To inspect startup:
+
+```sh
 .tools/python/bin/python scripts/device.py monitor --reset --seconds 15
-
-# Only needed after changing the font settings; generated C is checked in.
-sh scripts/font.sh
 ```
 
-The device script selects the sole Espressif 303a:1001 USB device, or accepts
-`--port /dev/cu.usbmodem…` when multiple devices are connected. Monitoring is
-bounded and closes the port when finished. Flashing generates the custom table from `partitions.csv` and checks the
-application against its factory partition size before writing. USB
-monitoring and screenshots suppress PySerial's DTR/RTS writes on open, which
-otherwise reset the S3 on this Mac. Only `--reset` explicitly pulses reset.
-
-Use the build script after C/font changes: it touches the bindings header to
-make Cargo run CMake/Ninja, because esp-idf-sys does not track every extra
-component source. Tooling lives under `.tools/` and `.embuild/`;
-the initial build downloads ESP-IDF, its C compiler and managed dependencies.
-The Espressif Rust compiler must already be installed with espup (ordinary
-upstream rustup does not provide the Xtensa target). `LIBCLANG_PATH` defaults to
-espup's `~/.espup/esp-clang`. Use `gmake` if invoking GNU Make on macOS.
-
-ESP-IDF's headers use GNU inline assembly, so the bridge compiles as `gnu17`
-(C17 with GNU extensions). Flash headers use ESP-IDF's generated settings:
-the ROM starts in DIO, then the bootloader configures QIO.
-
-## Bring-up results (2026-10-08)
-
-- Release build succeeded with the pinned Rust/IDF/LVGL stack.
-- Bootloader, partition table and application were flashed and hash-verified.
-- Application image with cards, screenshots and Wi-Fi: 1,396,256 bytes, within the
-  1,536,000-byte factory partition.
-- The on-device 8 MiB PSRAM memory test passed.
-- Touch probe: 0x15, ID 0xb7, selecting the V2 panel offset.
-- LCD driver initialized; LVGL started; Rust printed `pip: ready`.
-- Free heap after UI/screenshot setup, before network initialization:
-  144,763 bytes internal; 8,048,776 bytes PSRAM.
-- Initial portrait build ran for 15 seconds after reset without a crash or reboot;
-  the user confirmed that tapping the circle changes its color.
-- Landscape appearance verified through the live QuickTime camera; the user
-  confirmed both upright text and working touch after rotation.
-- Three consecutive direct screenshots passed length/CRC validation while
-  preserving device uptime; each capture took approximately 1.2 seconds.
-- A decision card sent through the host HTTP API rendered on the real device;
-  its screenshot was retrieved through the bridge API.
-- The user's physical "Looks good" selection was recorded once by the host.
-- Wi-Fi was provisioned through the local password prompt; `/health` confirmed
-  a TCP connection, and a subsequent notice delivered over Wi-Fi appeared in
-  the device screenshot.
-- Endpoint changed to `<MAC_HOSTNAME>.local:8787` without re-entering credentials; the
-  device reconnected after a bridge restart using its saved hostname.
-- The earlier blank-panel discrepancy was confirmed physically. The v1 pass
-  fixed it using the vendor's complete V2 reset/wake ordering; both the user
-  and a later live camera capture confirmed visible, upright artwork.
-- Eight host tests cover screenshot integrity/color conversion, TCP
-  authentication, reconnect/re-delivery, persistent choices, interaction
-  deduplication and error-card validation. The hardware UI smoke test also
-  passes state changes, pagination, back navigation, queue advancement and
-  acknowledged dismissals.
-- The documented incremental build command also passed with `--locked`.
-
-Logs are local and ignored: `.tools/build.log`, `.tools/flash.log`, `.tools/boot.log`.
-Genuine cold power-on remains unverified. A board-driver warning
-about I2C pull-ups and a panel pixel-format override warning appeared; neither
-prevented controller identification or reaching the ready state.
-
-Font source: installed Inter Variable 4.002, git-9bdd60c3a. SHA-256:
-`e4205c4f6732a09891a43569397b59c53ee289ec915bf040d3425b4251ca2f94`.
-
-## Pixel-exact screenshots
-
-```sh
-# When the bridge does not own the USB port:
-.tools/python/bin/python scripts/device.py screenshot --output .tools/screen.png
-
-# When running the bridge with --serial:
-curl --fail http://127.0.0.1:8788/screenshot.png -o .tools/screen.png
-```
-
-`LV_EVENT_FLUSH_START` copies each dirty RGB565 rectangle before the display
-port's rotation and byte swap. The resulting 448 × 368 shadow image contains
-the pixels submitted to the display, in upright logical coordinates. This is
-not a second rendering of the object tree. It is also not panel-memory readback:
-use the camera to diagnose panel power/scanout failures and visible timing.
-
-The shadow costs 329,728 bytes in PSRAM, with another 329,728 bytes temporarily
-allocated during capture. The LVGL lock covers only the snapshot copy, so the UI
-can animate during USB transfer. A CRC-32, dimensions, offsets, flush count and
-device timestamp accompany the capture. The host rejects missing/corrupt data
-and encodes PNG using Python's standard library. RGB565 expands to RGB888 by bit
-replication. The initial font subset is printable ASCII.
-
-Do not replace the bulk USB writes with `printf` per data line: console output
-can silently drop bytes on its short timeout. Long transfers also yield CPU
-time periodically so they cannot starve the idle task/watchdog.
-
-## Host bridge and semantic cards
-
-The host owns the queue, context and actions. Dot displays one card at a time
-and returns stable card/option IDs. It never executes an email action itself.
-
-```sh
-# USB transport for immediate development, plus the TCP listener:
-.tools/python/bin/python scripts/bridge.py --serial auto
-
-# After Wi-Fi provisioning, TCP alone is enough:
-.tools/python/bin/python scripts/bridge.py
-```
-
-The device TCP listener binds `0.0.0.0:8787`; the tooling HTTP API binds only
-`127.0.0.1:8788`. Both ports are configurable. TCP uses newline-delimited JSON,
-a randomly generated pairing token, 10-second heartbeats and reconnects.
-The current TCP transport assumes a trusted LAN and does not use TLS.
-The bridge token and durable queue/event history live in ignored, private
-`.tools/bridge-config.json` and `.tools/bridge-state.json` files. Cards can
-contain private content, so do not check these files into version control.
-
-The HTTP API is a local tool integration point. Browser origins are rejected;
-it is not a public website/API. Dot uses the MCP adapter described below;
-email access remains a separate Dot plugin connection.
-
-| Endpoint | Meaning |
-| --- | --- |
-| `GET /health` | Connection, active transport and pending count |
-| `POST /cards` | Queue an immutable notice/decision; optional caller-supplied ID |
-| `GET /cards` | Card history and pending/answered state |
-| `GET /events?after=0` | Choice events with monotonic sequence numbers |
-| `GET /screenshot.png` | Capture the screen while the bridge owns USB |
-| `POST /configure` | USB provisioning; normally called by `device.py` |
-
-Example request body for `POST /cards`:
-
-```json
-{
-    "id": "example-decision-1",
-    "kind": "decision",
-    "title": "A question from Dot",
-    "body": "This is a test. Which option should I use?",
-    "options": [
-        {"id": "first", "label": "First option"},
-        {"id": "second", "label": "Second option"}
-    ]
-}
-```
-
-Notices use a dismissal page. Decisions require 1–3 options. Display
-text currently supports printable ASCII and newlines: title up to 60 characters,
-body up to 600, option label up to 64. Titles and bodies paginate together.
-Choices use the Figma renderer described below.
-
-On connection, the device sends `{"type":"hello","version":1,"device":"pip",
-"token":"..."}`. The server responds with `welcome`, then the pending card
-(`type: card`). A tap sends `{"type":"choice","card_id":"...",
-"option_id":"..."}`; the bridge saves it before returning an `ack` with the same
-IDs. Duplicate choices produce one event. Pending cards survive a server restart
-and are redelivered after reconnect; device replies retry until acknowledged.
-An unacknowledged choice is currently held in device RAM and does not survive
-device power loss. The host's persisted result prevents re-executing an already
-recorded decision. External action handlers must also deduplicate by card ID.
-
-### Wi-Fi provisioning
-
-The ESP32-S3 needs a 2.4 GHz network. Run the bridge first, then use a local
-terminal prompt to provision credentials over USB:
-
-```sh
-.tools/python/bin/python scripts/device.py configure \
-    --host "<MAC_HOSTNAME>.local" --via-bridge
-```
-
-Use the Mac's Bonjour hostname rather than its DHCP address. Find it with
-`scutil --get LocalHostName`; ESP-IDF's `CONFIG_LWIP_DNS_SUPPORT_MDNS_QUERIES=y`
-makes standard hostname resolution query mDNS for `.local` names. The TCP client
-resolves the hostname on each reconnect. The command prompts for SSID
-and a hidden password; neither is passed on the shell command line. Credentials
-and host settings are saved in the device's `pip` NVS namespace. The current
-setup supports open networks and WPA2-compatible personal networks, not
-enterprise authentication/captive portals. Omit `--via-bridge` when the bridge
-does not own USB. A successful TCP connection takes over from the USB transport.
-Check `/health` for `"transport":"tcp"` to verify the actual connection.
-
-To change only the endpoint while retaining Wi-Fi credentials and the token:
-
-```sh
-.tools/python/bin/python scripts/device.py set-host --host "<MAC_HOSTNAME>.local"
-```
-
-This command uses USB; stop the bridge's USB transport first if it still owns
-the port. It does not reset the device or require the Wi-Fi password again.
-
-Tests:
-
-```sh
-.tools/python/bin/python -m unittest discover -s scripts -p 'test_*.py'
-cargo fmt --check
-sh scripts/build.sh --locked
-```
-
-## Recovery
-
-Firmware replacement is authorized; no factory backup is required for this
-project. Flashing leaves eFuses untouched. If automatic ROM-loader entry fails,
-hold BOOT while resetting/powering on, release BOOT, then rediscover the USB port.
-Do not permanently disable USB Serial/JTAG or repurpose GPIO19/20.
-
-## References
-
-- [Waveshare hardware and revisions](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-1.8)
-- [Vendor examples and setup](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.8/tree/78e13f852929c2ab4f9d5e0ad1c50ea378dbf2b4)
-- [Waveshare BSP 2.0.3](https://components.espressif.com/components/waveshare/esp32_s3_touch_amoled_1_8/versions/2.0.3)
-- [Rust ESP-IDF build options](https://github.com/esp-rs/esp-idf/blob/master/esp-idf-sys/BUILD-OPTIONS.md)
-- [LVGL font format](https://lvgl.io/docs/open/9.2/overview/font)
-
-The new app is independent of Playbit; the archived document was used only as
-a board reference.
-
-## Figma v1 renderer (2026-10-08)
-
-The authoritative v1 is the flow in the user's 13:45 screenshot, with source
-frames listed in [assets/figma/README.md](assets/figma/README.md). Other areas
-of the Figma file are WIP, except the subsequently approved reply-choice flow
-`4:1568` supplied in the user's 15:37 screenshot.
-
-`components/pip_board/pip_ui.c` renders sleeping, idle, listening, thinking and
-attention faces using the original Figma vectors. Messages use Inter Medium
-55 px (2× the design), optical size 27.5, 64 px line spacing and cap-height-aligned positioning.
-The display is RGB565, so colors and antialias coverage are quantized.
-
-Messages wrap using LVGL's own font metrics into four-line pages. An optional
-`title` becomes the first paragraph; omit it for an uninterrupted message.
-Left/right 128 px strips navigate. The last text page advances to a checkmark
-screen; its center region dismisses. Message dots exclude the dismissal page,
-matching Figma. Long messages show a sliding window of up to nine dots.
-A new card stays on the yellow attention screen until a fresh tap. A touch that
-began before the card arrived cannot open it on release. Dismissal retains the
-existing retry/ACK protocol; an acknowledged card advances the host queue or
-returns to idle. `kind: "error"` uses the same flow in #a44200.
-
-Decisions use the same text pages, followed by one white inset card per choice.
-The page row combines text-page dots with A/B/C markers. Tapping a choice opens
-a separate confirmation screen; only a tap inside its white circle submits.
-Horizontal swipes move between pages. On choice screens, taps in the blue
-left/right margins also navigate; on confirmation screens, the arrows navigate
-and cancel the tentative selection. Forward at the final choice stays on that
-choice, and back from choice A returns to the final text page. Vertical drags
-do not select or confirm. Labels use Inter Medium 55 px and are centered within
-the 400×256 card; unusually long labels shrink to fit rather than being clipped.
-Confirmation uses a 192 px circle, Inter SemiBold 22 px caption, and Bold 33 px
-choice markers. The device emits its existing durable choice reply only after
-confirmation, so the MCP/event protocol is unchanged.
-
-The reply-choice firmware was built, flashed with hash verification, and
-checked using CRC-verified device screenshots against the Figma reference.
-The hardware tests passed for 1/2/3 choices, backward and forward navigation,
-confirmation cancellation, and prevention of premature replies. The existing
-notice/error UI smoke test and all 18 host tests also passed. Hardware tests
-use simulated touch. The user also verified physical swipes, choice taps, and
-confirmation on the device.
-
-The user observed slow top-to-bottom redraws and tearing. Profiling found that
-the touch handler was subscribed to draw events as well as input events, causing
-repeated synchronous LVGL warnings during rendering. It now subscribes only to
-press/release/press-lost events. Redundant child corner clipping was removed
-(all current content is inset within the rounded background), and LVGL's C
-rasterizer is built with `-O2` rather than the default `-Os`.
-
-Measured full-screen face redraws dropped from 225–236 ms to 76–83 ms, with
-pixel-identical captures for all five faces. These are median LVGL refresh
-durations over three samples per state, including software rotation, screenshot
-buffer copies, and transfer submission/waits. The final asynchronous DMA
-completion may occur after the measured refresh ends. This is about a 3×
-improvement, not proof of 30 FPS animation or tear-free panel scanout. The
-current path still sends 15 partial strips per full redraw; transfer batching,
-rendering cost, and panel synchronization remain work for animated transitions.
-
-Reproduce the measurement with an empty device queue:
-
-```sh
-.tools/python/bin/python scripts/render-bench.py --output .tools/render-bench
-```
-
-The test cycles the face states, records timings, and captures each state.
-The separate sleep benchmark below measures sustained animated refreshes.
-The USB `render-stats` command reports the last nonempty refresh: `refresh_us`
-is elapsed time, `flush_us` is time in flush callbacks (including copies and
-rotation), `wait_us` is time waiting for a previous transfer, and `strips` and
-`pixels` describe the workload. It does not stream logging during rendering.
-
-Holding sleeping/idle starts microphone recording and shows listening; releasing
-stops recording and shows thinking while the host gates/transcribes it.
-Short or quiet recordings return to idle without a transcript. See **Local
-voice input** below for setup and limits.
-
-Idle transitions to sleeping after 10 seconds without interaction.
-Entering idle starts a fresh timeout; touch activity resets it, and leaving
-idle cancels it. An incoming card therefore prevents sleep while it is being
-read. Holding a finger down also prevents sleep. Network heartbeats and
-diagnostic inspection do not count as user activity. Holding sleeping still
-starts listening. This is a UI state transition, not MCU deep sleep.
-Interaction events are best-effort notifications; unlike card replies they
-are not retried. Their unique IDs let the host deduplicate received events.
-
-```sh
-# Show a companion state when the card queue is empty.
-curl --fail http://127.0.0.1:8788/state \
-    -H 'Content-Type: application/json' -d '{"state":"sleeping"}'
-
-# Show a paginated message (omit title to avoid an extra paragraph).
-curl --fail http://127.0.0.1:8788/cards \
-    -H 'Content-Type: application/json' \
-    -d '{"kind":"notice","body":"A message from Dot."}'
-
-# Hardware smoke test: requires TCP connected and an empty queue.
-.tools/python/bin/python scripts/ui-smoke.py
-.tools/python/bin/python scripts/choices-smoke.py
-.tools/python/bin/python scripts/idle-smoke.py
-```
-
-The hardware test generates and dismisses its own notice/error cards, checks
-page boundaries and back navigation, verifies host replies, and saves CRC-
-validated screen captures under `.tools/v1/`. The choice test covers 1–3
-options, swipe boundaries, tentative-selection cancellation, and exactly one
-reply after confirmation, with captures under `.tools/choices/`.
-The idle test checks the 10-second timeout, activity reset, wake tap, and
-incoming-message interruption, with captures under `.tools/idle/`.
-USB JSON commands `inspect`, `tap`, and `drag` expose UI state and invoke the
-same navigation handler as physical touch. A drag has `x0`, `y0`, `x1`, `y1`;
-they are development tools, not evidence that the touch hardware was tapped.
-
-The v1 artwork exceeds the original app partition. `partitions.csv` gives the
-factory app 4 MiB at 0x10000 and keeps NVS/PHY addresses unchanged. The flashing
-script generates and validates that real table; esp-idf-sys uses its temporary
-project's default table during the intermediate build. LVGL uses ESP-IDF's C
-allocator so large image-decoder buffers can use PSRAM instead of exhausting
-LVGL's former 64 KiB fixed pool. DMA display buffers remain internal.
-
-Final v1 validation: 1,669,456-byte firmware in the 4 MiB app partition; eight
-host tests and the hardware UI smoke test pass. The final idle/listening screens
-were also verified through background QuickTime captures. Font comparison
-against the Figma reference places the first message's line extents within
-1–2 device pixels (font rasterization/RGB565 differences remain). A transient
-post-flash TCP disconnect interrupted one run; the full run passed after Wi-Fi
-settled. The bridge reconnects automatically.
-
-Panel startup reference:
-[Waveshare Arduino CO5300 driver](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.8/blob/main/examples/arduino-v2/libraries/GFX_Library_for_Arduino/src/display/Arduino_CO5300.cpp)
-and its adjacent header's initialization table. The USB `panel` diagnostic
-prints raw SPI read attempts; all-zero reads on this setup are inconclusive
-and must not be interpreted as panel state. Physical camera checks remain
-necessary for scanout verification.
-
-## ChatGPT Dot integration
-
-The existing bridge owns the device connection, persistent queue, and answers.
-The MCP adapter is `scripts/pip_mcp.py`; no model runs in the bridge. All five
-semantic tools are available over authenticated, stateless HTTP on
-`127.0.0.1:8789/mcp`. `scripts/mcp-stdio.py` forwards stdio to that endpoint for
-local Codex and Secure MCP Tunnel. The local administrative API remains on
-8788; the tunnel must target the MCP adapter, not the administrative API.
-
-| Tool | Arguments | Result |
-| --- | --- | --- |
-| `send_message` | `request_id`, `text`, optional `importance` | Queue a notice |
-| `ask_question` | `request_id`, `text`, `options`, optional `importance` | Queue a decision |
-| `get_request` | `request_id` | Text, status, options, selected option |
-| `get_device_status` | none | Connection, queue, subscription/delivery health |
-| `cancel_request` | `request_id` | Cancel pending request; answered requests retain their answer |
-
-Use caller-generated request IDs (up to 64 ASCII characters); retrying an ID
-requires identical content. Text supports printable ASCII/newlines, up to 600
-characters. Decisions have one to three `{id, label}` options; labels are at
-most 64 characters. `importance` is `normal` or `urgent`. Urgent requests move
-ahead of waiting normal requests but never preempt the current screen. Pending
-means queued, not confirmed displayed or read. Decisions use the approved
-paginated choice-and-confirm flow. Rescan the cloud plugin after updating its
-tool schemas or imported skill so the new option-label limit is discovered.
-
-Cancellation persists before notifying the device. A `sync` device message
-contains the host's current `card_id` or null; firmware clears a mismatching
-card and pending reply. Reconnecting receives `sync` before the current card,
-so a cancellation made while offline also clears the stale display. The new
-firmware is required for cancellation (an older build ignores `sync`).
-
-### Replies and subscriptions
-
-The MCP Events catalog advertises `device.reply`. Subscribe before sending a
-question, optionally filtering by `request_id`. Its data contains `request_id`,
-`kind`, `option_id`, and `option_label`. Notice dismissal is acknowledgement,
-not approval. The skill tells Dot to recover the request and original task
-context before acting. Events contain data, not new instructions.
-
-The server implements `server/discover`, `events/list`, `events/subscribe`, and
-`events/unsubscribe` for protocol `2026-07-28`, plus legacy MCP initialization
-for local clients. Subscriptions live seven days by default; `ttlMs` grants
-between one minute and 30 days. A null requested lifetime receives seven days.
-The server returns `refreshBefore` and stops delivery at expiration. Event
-replay is not advertised (`cursor: null`); `get_request` recovers missed replies.
-
-Subscription verification and delivery use Standard Webhooks HMAC-SHA256.
-Callback URLs must use public HTTPS on port 443. DNS is checked on every
-connection, the socket is pinned to a checked address, TLS verifies the
-original hostname, and redirects/proxy environment variables are not followed.
-Subscriptions, keys, cursors, and the delivery outbox persist in the bridge's
-private state file. Retried deliveries preserve event IDs and use fresh
-signatures. Transient failures back off, with at most ten attempts; 410 stops a
-subscription, and 413/other permanent client errors stop that delivery. A 2xx
-means webhook receipt, not completion of the Dot's subsequent action. Consumers
-must deduplicate event IDs. Existing bridge answers remain queryable even if
-webhook delivery fails. Changing the MCP bearer credential revokes existing
-subscriptions after a bridge restart.
-
-Acknowledged card replies generate `device.reply`. Accepted microphone recordings
-generate `device.transcript` after local recognition. These are separate
-subscriptions; adding the new event requires rescanning an existing cloud plugin.
-`get_voice_input(recording_id)` recovers persisted text. Normal voice input does
-not retain raw audio; the explicit voice-tuning mode below keeps local WAVs.
-
-### Setup: device, local bridge, and ChatGPT Dot
-
-This walkthrough targets macOS. Replace the following placeholders with your
-own values. No account IDs or API keys belong in this README or in chat.
-
-| Placeholder | Meaning |
-| --- | --- |
-| `<PROJECT_DIR>` | Absolute path to this repository |
-| `<MAC_HOSTNAME>` | Output of `scutil --get LocalHostName`, without `.local` |
-| `<TUNNEL_NAME>` | A name you choose for the tunnel, such as `desk-display` |
-| `<TUNNEL_ID>` | The `tunnel_…` ID returned by Platform |
-| `<WORKSPACE>` | The ChatGPT workspace containing your Dot |
-| `<PLUGIN_NAME>` | A name you choose for the ChatGPT plugin |
-| `<DOT_NAME>` | Your ChatGPT Dot's name |
-| `<RUNTIME_API_KEY>` | A runtime API key with Tunnels Read + Use |
-
-Names such as `rsms-dot`, `pip`, and `local.rsms.pip-bridge` in source paths,
-commands, and service labels are fixed identifiers in this implementation,
-not example account names. The tunnel helper uses the local alias `rsms-dot`
-regardless of the remote `<TUNNEL_NAME>`.
-
-#### 1. Build and flash the device
-
-Install Cargo, uv, Node/npm, and Espressif's Xtensa Rust toolchain using espup
-(the pinned toolchain is listed under Build layout). Connect the board over USB.
-
-```sh
-cd "<PROJECT_DIR>"
-sh scripts/bootstrap.sh
-sh scripts/build.sh --locked
-.tools/python/bin/python scripts/device.py info
-.tools/python/bin/python scripts/device.py flash
-```
-
-Keep the checkout at this path after installing services, which use absolute
-paths. Reinstall them if the checkout moves. Skip rebuilding/flashing if the
-current firmware is already installed.
-
-#### 2. Start the bridge and configure Wi-Fi
-
-Install the bridge as a user launchd service. It runs independently of the
-terminal or chat and starts at login. Stop any manually started bridge first;
-only one process can own ports 8787, 8788, 8789, and 8790.
+`bootstrap.sh` installs repository-local helpers. The first build downloads
+ESP-IDF and its managed dependencies. Generated artwork and fonts are checked
+in, so Figma is not needed to build. Use `scripts/build.sh` after C or font
+changes too: it makes Cargo recheck the additional C components.
+
+Versions are pinned in `rust-toolchain.toml`, `Cargo.lock`, and
+`components_esp32s3.lock`: ESP-IDF 5.5.5, Waveshare BSP 2.0.3, LVGL 9.2.2, and
+`esp_lvgl_port` 2.6.2. Build products live in ignored `.tools/`, `.embuild/`,
+`managed_components/`, and `target/` directories.
+
+## Set up the bridge and Wi-Fi
+
+Install the bridge as a user service, then provision the device over USB:
 
 ```sh
 .tools/python/bin/python scripts/bridge-service.py install
@@ -606,17 +117,45 @@ scutil --get LocalHostName
 curl --fail http://127.0.0.1:8788/health
 ```
 
-The configuration command prompts locally for the 2.4 GHz Wi-Fi network and
-hidden password, and sends them over USB. This launchd service uses TCP, so
-omit `--via-bridge`; that flag is only for a bridge started with `--serial`.
-Wait for health to show `connected: true` and `transport: "tcp"`.
-The Mac and device must be on a LAN that permits their connection and mDNS.
-The Mac must remain awake and online for the physical interface to work.
+Replace `<MAC_HOSTNAME>` with the output of `scutil`. The configuration command
+prompts for your Wi-Fi network and a hidden password. It saves those credentials,
+the hostname, and a pairing token on the device. Use a hostname instead of a DHCP
+address. Wait for `/health` to report `connected: true` and `transport: "tcp"`.
 
-#### 3. Install the local skill and MCP connection
+The service starts at login and uses absolute paths, so keep the checkout in
+place. Only run one bridge at a time. For foreground development, stop the
+service and run the bridge yourself:
 
-This step gives local Codex access. Cloud Dot access is configured separately
-in steps 4–6.
+```sh
+.tools/python/bin/python scripts/bridge-service.py stop
+.tools/python/bin/python scripts/bridge.py
+```
+
+Use `bridge.py --serial auto` for USB card transport during development. If that
+process owns USB, add `--via-bridge` to the provisioning command. Voice streaming
+requires Wi-Fi. Run `bridge-service.py install` again to restore the service.
+
+To change the saved host without re-entering Wi-Fi credentials, use USB:
+
+```sh
+.tools/python/bin/python scripts/device.py set-host --host "<NEW_HOSTNAME>.local"
+```
+
+Try a message before connecting Dot:
+
+```sh
+curl --fail http://127.0.0.1:8788/cards \
+    -H 'Content-Type: application/json' \
+    -d '{"kind":"notice","body":"Hello from esp32-dot."}'
+```
+
+Tap the yellow attention screen to read it, then advance to the checkmark and
+dismiss it.
+
+## Connect a local coding agent
+
+The bridge exposes MCP through `scripts/mcp-stdio.py`. For Codex, register it and
+install the accompanying skill from the repository root:
 
 ```sh
 mkdir -p "$HOME/.agents/skills"
@@ -624,112 +163,76 @@ ln -s "$PWD/skills/rsms-dot" "$HOME/.agents/skills/rsms-dot"
 codex mcp add rsms-dot -- "$PWD/.tools/python/bin/python" "$PWD/scripts/mcp-stdio.py"
 ```
 
-If the symlink or MCP entry already exists, inspect it instead of creating a
-second copy. The stdio adapter reads the local bearer credential itself; no
-API key or environment variable is needed in this MCP registration.
+Inspect an existing symlink or MCP registration before replacing it. For another
+client, choose **STDIO**, use `<PROJECT_DIR>/.tools/python/bin/python` as the
+command and `<PROJECT_DIR>/scripts/mcp-stdio.py` as its argument. The adapter reads
+the local credential itself; no environment variables are needed.
 
-For manual entry in a desktop **local MCP** form, choose **STDIO**:
+`<PROJECT_DIR>` means your checkout's absolute path. Identifiers such as
+`rsms-dot`, `pip-firmware`, and `local.rsms.pip-bridge` are existing package and
+service names, not a required name for your Dot. The supplied skill and tool
+descriptions include the original owner's name; personalize them for your setup.
 
-| Field | Value |
-| --- | --- |
-| Name | `rsms-dot` |
-| Command | `<PROJECT_DIR>/.tools/python/bin/python` |
-| Argument | `<PROJECT_DIR>/scripts/mcp-stdio.py` |
-| Working directory | `<PROJECT_DIR>` |
-| Environment variables | None |
+## Connect ChatGPT Dot
 
-That desktop form's **STDIO / Streamable HTTP** selector configures a local
-connection. It is not the cloud tunnel form used in step 5.
+Local MCP registration does not connect cloud Dot. These steps expose the same
+bridge through a private tunnel. Use your own names and IDs for all placeholders.
 
-#### 4. Create and start a Secure MCP Tunnel
+### 1. Start a Secure MCP Tunnel
 
-Install the official client; the helper verifies its release SHA-256 checksum:
+In [Platform tunnel settings](https://platform.openai.com/settings/organization/tunnels),
+create `<TUNNEL_NAME>` and associate it with your ChatGPT workspace. Creation
+requires Tunnels Read + Manage; create a runtime API key with Tunnels Read + Use.
+See the official [Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+for workspace access requirements.
 
 ```sh
 .tools/python/bin/python scripts/tunnel.py install-client
-```
-
-In [Platform tunnel settings](https://platform.openai.com/settings/organization/tunnels),
-create `<TUNNEL_NAME>` and associate it with `<WORKSPACE>`. Copy `<TUNNEL_ID>`.
-Creating a tunnel requires Tunnels Read + Manage. Create a separate runtime
-API key whose principal has Tunnels Read + Use; do not use an admin key for the
-running daemon.
-
-```sh
 .tools/python/bin/python scripts/tunnel.py configure
-```
-
-Enter `<TUNNEL_ID>` at the first prompt and `<RUNTIME_API_KEY>` at the hidden
-key prompt. The helper stores the key in `.tools/tunnel-runtime-key`, mode
-0600, and starts a managed tunnel runtime using a file reference to that key.
-The tunnel forwards to the stdio adapter. It does not require router port
-forwarding or a public listener on the Mac.
-
-```sh
 .tools/python/bin/python scripts/tunnel.py status
 .tools/python/bin/python scripts/tunnel.py doctor
 ```
 
-Expect `process_running`, `healthy`, and `ready` to be true. A running tunnel
-alone does not establish a ChatGPT plugin or event subscription.
+`configure` prompts for `<TUNNEL_ID>` and the hidden runtime key, then starts the
+managed client. Expect `process_running`, `healthy`, and `ready` to be true.
+The key stays in a local file with mode 0600. The tunnel targets the stdio MCP
+adapter; no router port forwarding is needed.
 
-#### 5. Connect the cloud plugin in a web browser
+### 2. Add the plugin
 
-Open [ChatGPT Plugins](https://chatgpt.com/plugins) **in a web browser**, signed
-into `<WORKSPACE>`. This is distinct from the desktop local MCP form.
+Open [ChatGPT Plugins](https://chatgpt.com/plugins) in a web browser in the
+associated workspace:
 
-1. Choose **Add custom MCP server**.
-2. Name it `<PLUGIN_NAME>`.
-3. Under **Connection**, choose **Tunnel** and select `<TUNNEL_NAME>` or enter
-   `<TUNNEL_ID>`.
-4. Under **Authentication**, choose **No authentication**. The tunnel is
-   authenticated using its runtime credential and Platform/workspace access
-   controls. Our adapter supplies the separate local bridge credential;
-   this server does not implement an additional OAuth login.
-5. Create/connect the private plugin and scan its capabilities. Expect
-   `send_message`, `ask_question`, `get_request`, `get_device_status`,
-   `cancel_request`, and the `device.reply` event.
-6. Make the plugin available to `<DOT_NAME>` through its connected apps/plugins.
+1. Choose **Add custom MCP server** and name it `<PLUGIN_NAME>`.
+2. Choose **Tunnel** under Connection and select your tunnel.
+3. Choose **No authentication**. The tunnel supplies access control, and the
+   adapter authenticates to the bridge; this project has no additional OAuth login.
+4. Create and scan the plugin, then make it available to your Dot.
 
-If Tunnel is unavailable, check the selected workspace, its association with
-`<TUNNEL_ID>`, and your tunnel permissions. If you only see **STDIO** and
-**Streamable HTTP**, check that you are using the web cloud connection form.
+The desktop **STDIO / Streamable HTTP** form configures a local connection;
+use the web tunnel form for this setup. Check discovery includes `send_message`,
+`ask_question`, `get_voice_input`, and both `device.reply` and `device.transcript`.
 
-The server also exposes the `io.modelcontextprotocol/skills` extension,
-`skills/list`, `skills/get`, and `resources/read`, with a SHA-256 digest for
-`skills/rsms-dot/SKILL.md`. Skill import is a scan-time snapshot; rescan after
-updating the skill. The local symlink alone does not install a cloud skill.
-No public plugin-directory publication is needed for this private setup.
+After changing tools, events, or the imported skill, use the plugin settings'
+**Manage app → Refresh tools**, then verify discovery. The local skill symlink
+alone does not update the cloud plugin's imported skill.
 
-#### 6. Verify a complete Dot interaction
+### 3. Test questions and replies
 
-Send this in `<DOT_NAME>`'s own chat, replacing `<PLUGIN_NAME>`:
+Send this in your Dot's chat, replacing `<PLUGIN_NAME>`:
 
-> Use `<PLUGIN_NAME>`. Subscribe to device.reply for request_id
-> desk-display-test-001. Ask "Can you see this?" on my desk display with options
-> Yes and No, using that request ID. When the reply event arrives, tell me here
-> which option I chose.
+> Use `<PLUGIN_NAME>`. Subscribe to device.reply for request_id desk-test-001.
+> Ask "Can you see this?" on my desk display with Yes and No options, using that
+> request ID. When the reply arrives, tell me in this chat which option I chose.
 
-Tap an option on the device. Confirm that the Dot reports that choice in the
-same conversation. This checks tool delivery, the physical reply, signed
-webhook receipt, and actual cloud continuation. Sending a question without a
-subscription does not arrange a wakeup. Use a fresh request ID for a new test;
-reuse an ID only to retry the same request.
+Tap attention, navigate to a choice, select it, and tap Confirm. Verify that Dot
+reports the choice in chat. Use a fresh request ID for each new test.
+Subscriptions arrange event delivery; a tool call alone does not subscribe Dot
+to future replies.
 
-`get_device_status` reports active reply subscriptions and webhook delivery
-counts. `get_request` recovers a saved answer. A webhook's successful receipt
-is not proof that the Dot has completed its subsequent action.
+### 4. Enable voice
 
-For latency diagnosis, private bridge state records the card's `created_at`
-and `answered_at`, and each webhook's `first_attempt_at`, `last_attempt_at`,
-`last_completed_at`, and `last_duration_ms`. These distinguish local dispatch
-and HTTP delivery from the time the cloud Dot takes to continue. Timing fields
-are recorded for new delivery attempts; older deliveries may lack them.
-
-#### 7. Enable push-to-talk messages to Dot
-
-Install the local recognizer and restart the bridge while no recording is active.
-This requires CMake and GNU make (`gmake`) on macOS:
+Install the local recognizer and restart the bridge:
 
 ```sh
 sh scripts/setup-audio.sh
@@ -738,458 +241,173 @@ curl --fail http://127.0.0.1:8788/audio
 ```
 
 Wait for `ready: true`, `model: "whisper-large-v3-turbo-q8_0"`, and
-`preprocessing: "raw"`. If the plugin was connected before voice support was
-installed, rescan its MCP server on the ChatGPT plugin page to discover
-`device.transcript` and `get_voice_input`. In the plugin settings UI, the available
-action is **Manage app → Refresh tools**. Do not assume that clicking it updated
-the event catalog: confirm that the plugin's event list
-shows **both `device.reply` and `device.transcript`** before asking Dot to subscribe.
-A bridge restart does not refresh ChatGPT's scanned plugin catalog. If Dot sees
-only `device.reply`, rescan first, then ask it to retry the voice subscription.
-The server returns both events from `events/list`; voice delivery uses `webhook`
-with `recording_id`, `text`, and `audio_seconds` in the payload. See the official
-[MCP Events testing steps](https://developers.openai.com/plugins/build/mcp-events#test-in-chatgpt).
+`preprocessing: "raw"`. Setup builds a pinned whisper.cpp revision and downloads
+checksum-verified model weights. It uses Metal on macOS and keeps the model
+loaded between recordings.
 
-Send this in `<DOT_NAME>`'s own chat, replacing `<PLUGIN_NAME>`:
+Then send Dot:
 
 > Use `<PLUGIN_NAME>` and subscribe to device.transcript. Treat incoming
-> transcripts as voice messages from me. When replying to a voice message or
-> choice received from the device, respond both in this chat and on my desk
-> display. Use send_message for a concise device response, or ask_question when
-> I need to choose an option. Subscribe to device.reply to receive my choices.
-> Use get_device_status to confirm the voice subscription is active.
+> transcripts as voice messages from me. Reply both in this chat and on my desk
+> display, using send_message for a concise device reply or ask_question when
+> I need to choose. Subscribe to device.reply for my choices. If a voice event
+> has no readable text, retrieve it with get_voice_input using its recording_id
+> before asking me to repeat. Use get_device_status to confirm audio is ready
+> and the voice subscription is active.
 
-`get_device_status` should report `voice_subscriptions` greater than zero and
-`audio_available: true`. Connecting the plugin or subscribing to `device.reply`
-does not subscribe to voice input. Without a voice subscription, accepted
-transcripts are saved locally but are not automatically delivered to Dot.
+Hold the sleeping or idle screen, wait for recording to start, speak, and release.
+Recordings must contain at least one second of audio after microphone startup
+and pass the volume gate. Capture stops at 30 seconds. Verify a reply in **both**
+chat and on the device.
 
-To verify delivery, hold the sleeping or idle screen, wait for the listening
-state, say "Please send a message to my desk display confirming you received this voice test,"
-and release. Speak for at least one second at normal volume after the microphone
-is ready. Confirm that Dot
-responds both in chat and on the device; a response only in chat does not verify
-the return path to the display. Recognition runs locally; only the resulting text and recording
-metadata are sent through the voice event, not the audio. Ordinary voice audio
-is not retained on disk; voice-tuning mode intentionally saves WAVs and never
-sends those practice phrases as voice events. Transcripts remain in local bridge
-state even after delivery.
+Audio streams to the computer during capture; recognition starts after release.
+The live input is raw PCM into Whisper turbo, with no host denoising or LLM text
+correction. Normal audio is held in memory, not saved as WAVs. Transcripts are
+saved locally and delivered only when a voice subscription is active.
+An incoming card or host state change currently cancels an active recording.
 
-If local recognition succeeds but Dot does not respond, check the active voice
-subscription and webhook delivery status with `get_device_status`. Subscriptions
-expire and must be renewed by the subscriber; ask Dot to subscribe again if none
-is active. Successful webhook delivery confirms receipt, not completion of Dot's
-response. Cloud continuation can take longer than local recognition.
-If a particular transcript was accepted by the webhook but Dot has not answered,
-ask Dot to recover it with `get_voice_input` using its recording ID and respond
-both in chat and through `send_message`. Avoid replaying an already accepted webhook: it can cause
-duplicate handling without resolving a delayed cloud continuation.
-If Dot reports that a voice notification has no transcript, the webhook's text
-is under `data.text`. Ask it to call `get_voice_input` with the event's
-`recording_id` before asking you to record again. That tool retrieves the saved
-transcript even after successful webhook delivery.
+## Customize it with a coding agent
 
-#### 8. Restart, diagnose, and package
+Open this checkout in your coding agent and give it a concrete interaction,
+visual reference, or hardware change. It can edit the firmware and bridge, build,
+flash, and compare device screenshots. Tell it which board you have and whether
+it may replace the connected device's firmware.
+
+For example:
+
+> Read README.md and docs/hardware.md. Change the sleep character to match the
+> attached sketch, keeping its current breathing and tumbling timing. You may
+> build and flash the connected device. Capture before/after screenshots and
+> run the sleep benchmark. Report what was tested and commit the change.
+
+Or:
+
+> Add a new MCP tool for a focus timer. Keep countdown and rendering on the
+> device, and return completion through the bridge. Update the skill and tests,
+> and document any plugin refresh needed.
+
+Useful starting points:
+
+| Change | Files |
+| --- | --- |
+| Screens, gestures, pagination | `components/pip_board/pip_ui.c` |
+| Procedural sleep animation | `components/pip_board/pip_sleep.c` |
+| Brightness, rotation, display startup | `components/pip_board/pip_board.c` |
+| Device microphone and Wi-Fi | `components/pip_board/pip_audio.c`, `pip_network.c` |
+| Device commands and card lifecycle | `src/main.rs`, `src/network.rs`, `src/audio.rs` |
+| Host queue, MCP tools and events | `scripts/bridge.py`, `scripts/pip_mcp.py` |
+| Recognition and tuning | `scripts/pip_audio.py`, `scripts/pip_whisper.py`, `scripts/pip_tuning.py` |
+| Dot's use of the device | `skills/rsms-dot/SKILL.md` |
+| Artwork and typography | `assets/figma/`, `assets/fonts/`, `scripts/design-assets.py`, `scripts/font.sh` |
+
+The UI uses a 448 × 368 landscape canvas. Source artwork and font generators are
+included; generated C assets are checked in. Edit the source/generator rather
+than generated arrays, then regenerate the affected assets:
 
 ```sh
-# After editing bridge/MCP code:
-.tools/python/bin/python scripts/bridge-service.py restart
-.tools/python/bin/python scripts/bridge-service.py status
-
-# Reconnect a saved tunnel configuration after stopping/rebooting:
-.tools/python/bin/python scripts/tunnel.py start
-.tools/python/bin/python scripts/tunnel.py status
-.tools/python/bin/python scripts/tunnel.py doctor
+.tools/python/bin/python scripts/design-assets.py
+sh scripts/font.sh
+.tools/python/bin/python scripts/tuning-fonts.py
 ```
 
-Bridge logs are `.tools/bridge.log` and `.tools/bridge-error.log`. The launchd
-plist is `~/Library/LaunchAgents/local.rsms.pip-bridge.plist`. Subscription
-state and answers survive bridge restarts; the device reconnects automatically.
-Keep the bridge and managed tunnel runtime running while the plugin is in use.
+MCP messages are limited to 600 printable ASCII characters plus newlines, with
+one to three choices of up to 64 characters each. Broader text support requires
+both font coverage and protocol validation changes. Preserve stable request IDs
+and reply deduplication when changing interactions.
 
-Private files under ignored `.tools/` include `bridge-config.json` (device
-pairing token), `bridge-state.json` (cards, replies, webhook subscriptions and
-signing keys), `mcp-config.json` (local MCP bearer token), and
-`tunnel-runtime-key` (OpenAI runtime credential). Keep these local; do not add
-them to Git, plugin archives, screenshots, or documentation.
-
-`plugins/rsms-dot/plugin.json` is the portable manifest. Run
-`python3 scripts/package-plugin.py` to build `.tools/rsms-dot-plugin/` and its
-ZIP, containing a real copy of the skill and this host's stdio config. That
-package is for local installation; cloud uses the tunnel above. The generated
-archive excludes credentials, state, and runtime profiles.
-
-### Integration validation
+For a development loop:
 
 ```sh
 .tools/python/bin/python -m unittest discover -s scripts -p 'test_*.py'
-# Optional isolated official SDK interoperability test (mcp 2.3.0 tested):
-uv venv --python 3.11 .tools/mcp-test-python
-uv pip install --python .tools/mcp-test-python/bin/python mcp==2.3.0
-.tools/mcp-test-python/bin/python scripts/mcp-client-smoke.py
-# Real hardware; requires an empty queue. Creates only its own test requests.
-.tools/python/bin/python scripts/mcp-device-smoke.py
+cargo fmt --check
+sh scripts/build.sh --locked
+.tools/python/bin/python scripts/device.py flash
+.tools/python/bin/python scripts/device.py screenshot --output .tools/screen.png
 ```
 
-Host tests cover durable replies and webhook retries across restarts, filtering,
-verification failures, signing, credential rotation, idempotency, cancellation,
-priority ordering, HTTP authentication, and blocked callback destinations.
-All 32 host tests pass, including audio gates, streaming protocol, transcript
-events, tuning isolation, WAV preservation, and preprocessing validation. The official SDK test passes modern and legacy
-discovery, tools, and resources over both stdio and HTTP.
-The hardware test passed on the device after one transient USB inspection
-timeout. It sends requests through MCP/TCP, cancels a question, navigates
-and dismisses a message using simulated touch, then reads its persisted reply
-through MCP. Captures go in `.tools/mcp-smoke/`. Simulated touch is not evidence
-of a human tap or a successful cloud Dot subscription.
+Screenshots contain the pixels submitted to the display, before physical
+scanout. Use them for layout and pixel comparisons; inspect the physical panel
+or a camera for tearing, timing, and power issues. If using a shared computer,
+ask the agent to capture camera windows without activating them.
 
-A separate live cloud test also passed: the Dot subscribed, sent a question,
-the user tapped Yes on the device, the webhook received HTTP 200 on its first
-attempt, and the Dot reported Yes in the original conversation. End-to-end
-interaction was slow; webhook dispatch began about 144 ms after the bridge
-received the tap, but HTTP completion timing was not yet recorded. Questions
-used the prototype option buttons during that test; the later reply-choice
-design replaces them.
-
-References: [MCP Events](https://developers.openai.com/plugins/build/mcp-events),
-[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels),
-[MCP skill import](https://developers.openai.com/plugins/build/mcp-server), and
-[local skill discovery](https://learn.chatgpt.com/docs/build-skills).
-
-
-## Procedural sleep animation
-
-The sleeping scene is generated in `components/pip_board/pip_sleep.c`; no blob
-sprites or frame sequence are stored. An antialiased capsule and two closed-eye
-arcs are evaluated in rotating coordinates into a 128 × 104 RGB565 tile. The
-capsule stays on the bottom baseline while changing shape and rolling. The zZ
-strokes are generated once into two small tiles with staggered fades.
-
-The cycle is 1 second still, 4 seconds breathing, 1 second still, and 3 seconds
-of fading zZ. Each completed cycle has a 1-in-10 chance of a 3-second tumble to
-a different bottom position. The blob stays within the design's side margins.
-Touch presses and incoming cards stop the animation immediately. Still phases avoid
-redrawing the blob; animation positions use elapsed time rather than frame count.
+Hardware checks require USB, a TCP connection, and an empty message queue:
 
 ```sh
-# Capture reference poses, measure 12 seconds of continuous tumbling, restore normal sleep.
+.tools/python/bin/python scripts/attention-smoke.py
+.tools/python/bin/python scripts/choices-smoke.py
+.tools/python/bin/python scripts/render-bench.py --output .tools/render-bench
 .tools/python/bin/python scripts/sleep-bench.py
-# Leave the benchmark tumbling for visual inspection.
-.tools/python/bin/python scripts/sleep-bench.py --leave-running
 ```
 
-USB debug commands (while sleeping):
+Some hardware tests submit choices or capture real microphone audio. Run them
+with test subscriptions, or pause live subscriptions that would forward their
+output. Host unit tests use isolated fixtures. After bridge changes, restart
+its service; after firmware changes, rebuild and flash; after MCP/skill changes,
+refresh the cloud plugin as well.
 
-```json
-{"type":"sleep_animation","repeat":true}
-{"type":"sleep_animation","repeat":true,"seek_ms":750}
-{"type":"sleep_animation","repeat":false,"seek_ms":7500}
-{"type":"sleep_animation","repeat":false}
-```
-
-`seek_ms` freezes a pose for pixel inspection; omitting it resumes time. `inspect`
-includes phase, elapsed milliseconds, position, draw count, and rasterization
-time. This benchmark measured 28.6 nonempty LVGL refreshes/second, about 5.8 ms
-median refresh work, and approximately 7.5 ms procedural rasterization per
-moving frame. This measures submitted refreshes, not panel-synchronized scanout;
-TE/vsync synchronization and full-screen animated transitions remain future work.
-
-## Local voice input
-
-The ES8311 microphone captures mono 16-bit PCM at 16 kHz, with 30 dB input gain.
-A dedicated task streams each 20 ms block immediately over a separate authenticated
-TCP connection on the device port plus three (8790 by default). The display and
-card/reply socket remain independent. The `.local` hostname is resolved while
-idle by the control connection and its address is reused for audio. Wi-Fi
-association without a DHCP lease is retried after 20 seconds.
-
-Hold the sleeping or idle face to record, then release to stop. Losing touch
-contact also stops recording. Recording also
-stops after 30 seconds. An incoming card or host state change cancels it. A stale
-recognition result cannot replace a newer screen or recording. The speaker is
-not used. Microphone samples are never printed to USB.
-
-The host buffers at most 30 seconds (960 KB) in memory. It discards cancelled
-recordings, recordings shorter than 1 second, and recordings without at least
-200 ms above the level threshold. The gate ignores the initial 100 ms and
-removes per-block DC offset; its default RMS threshold is 0.0126 (about -38 dBFS).
-Use the bridge's `--audio-threshold` option for calibration. This is a simple
-energy gate, not a speech classifier; sustained background noise can pass it.
-The one-second minimum measures PCM received after codec settling, not the total
-time the screen is held. Explicitly cancelled recordings are still discarded.
-
-Accepted audio goes unchanged to a resident [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
-worker running **large-v3-turbo Q8**. There is no host denoising, edge trimming,
-normalization, or LLM text correction in the live path. Firmware still drains the
-codec's startup transient and applies its 5 ms startup fade, described below.
-Whisper is built from a pinned source revision; model downloads are checksum verified.
-On the development Mac it uses Metal acceleration and takes about 114 ms per saved
-tuning utterance after warmup. This excludes capture, transport, and cloud scheduling.
-
-PCM streams during capture; recognition begins after the stop/level gate. The model
-stays loaded between utterances, with separate context for each request. A synthetic
-silence request warms Metal kernels before readiness is reported. The bridge event
-loop remains responsive while the model starts and runs. If the worker exits or a
-request fails, audio becomes unavailable while a fresh worker starts automatically.
-Normal shutdown stops the child process. No remote recognition service is required.
-
-```sh
-sh scripts/setup-audio.sh
-.tools/python/bin/python scripts/bridge-service.py restart
-curl --fail http://127.0.0.1:8788/audio
-# Records three seconds using the actual device microphone:
-.tools/python/bin/python scripts/audio-smoke.py
-```
-
-`/audio` reports readiness, model name, raw preprocessing, capture status, signal
-levels, and timing without returning speech text. Accepted transcripts are persisted alongside bridge events.
-The worker receives an in-memory WAV over a loopback-only HTTP endpoint; ordinary
-voice recordings are not written to disk. Short/quiet/cancelled recordings never
-reach recognition. Tuning explicitly retains recordings as described below.
-
-Follow [setup step 7](#7-enable-push-to-talk-messages-to-dot) to subscribe Dot to
-`device.transcript` and verify voice delivery. Events use
-the same durable signed-webhook delivery as replies; consumers should deduplicate
-`recording_id` and account for recognition errors. The local skill includes the
-voice workflow. End-to-end cloud voice delivery still requires that subscription;
-local fixture and microphone tests do not create it automatically. Cloud event delivery latency is separate from local ASR latency.
-
-Whisper code and model weights use the MIT license. Downloads and build products
-are excluded from Git. The former Phonon recognizer remains available for offline
-comparisons: `sh scripts/setup-phonon.sh`, then
-`.tools/python/bin/python scripts/phonon-bench.py`. Its code is Apache-2.0 and its
-Fermion Research model weights are [CC-BY-4.0](https://huggingface.co/FermionResearch/Phonon-2-CoreML).
-
-
-Historical Phonon validation: the device streamed 12 seconds of microphone samples without
-blocking the UI, and quiet-room/very quiet speaker playback was discarded. The
-host's isolated PCM fixture test recognized the expected text about 90 ms after
-the final packet. A 7.46-second spoken test passed the level gate and transcribed
-in 89 ms. A second 5.2-second spoken test took 79 ms. Both included recognition
-errors, including the greeting and individual words, so speaking-distance
-accuracy is not yet sufficient. These local timings exclude cloud event delivery.
-`audio-smoke.py --play-file <SPEECH_WAV>` can exercise an acoustic fixture through
-the Mac output without changing system volume. Only use it when there is no live
-voice subscription that would forward test speech to a conversation.
-
-
-Hardware lifecycle checks also passed for incoming-message cancellation, rapid
-start/stop taps, and the automatic 30.0-second cap. After testing, the device is
-connected over TCP and the local model is ready; no recording is left active.
-The USB `network-stats` command reports DHCP state, association, RSSI, and free
-DMA memory without exposing provisioning credentials.
-
-
-## Voice tuning
-
-The device presents a phrase, keeps it visible while recording, then shows
-Retry, Exit, and Submit. Retry returns to the same phrase ready for another tap; Submit accepts
-the take and advances; Exit stops tuning. A local script starts and stops the mode; audio
-capture uses the device microphone, so measurements include the enclosure and
-normal speaking distance. The screen follows Figma group `5:99`: 40 px Inter Medium text, 48 px line
-spacing, the original red frame/dot asset, and the three white action buttons.
-Tap the phrase screen to start and tap again to stop; this keeps your hand out
-of the way while reading. Retry returns to the same phrase and waits for a tap.
-The main sleeping/idle experience still uses hold-to-record and release-to-stop.
-The frame and dot appear only once the first PCM packet has
-been sent, indicating that the microphone is ready.
+## Record samples for voice tuning
 
 ```sh
 .tools/python/bin/python scripts/voice-tune.py
-# Tap to record, wait for the red frame, speak, tap to stop.
-# Choose Retry, Exit, or Submit. Ctrl-C also stops.
-# Alternatively, keep it running without a terminal monitor:
-.tools/python/bin/python scripts/voice-tune.py start --detach
-.tools/python/bin/python scripts/voice-tune.py status
-.tools/python/bin/python scripts/voice-tune.py stop
 ```
 
-Provide `start --phrases phrases.txt` to use 8–100 distinct phrases, one per
-line, each at most 160 UTF-8 bytes, using printable ASCII or the curly apostrophe
-`’`. Phrases repeat until stopped, a message interrupts, or the connection is
-re-established. Restarting the bridge does not resume a tuning session.
+The device shows phrases to read. **Tap to record, tap to stop**, then choose
+Retry, Submit, or Exit. Retry returns to the phrase; Submit saves the take and
+advances. Ctrl-C stops the session. Use `start --phrases <PHRASES_FILE>` for a
+custom set of 8–100 phrases.
 
-Each submitted sample is saved under `.tools/voice-tuning/session-*/` as a mono,
-16 kHz, 16-bit `0001-raw.wav`. Unlike normal voice input, tuning intentionally
-retains the original WAV, even for short/quiet submissions, so it can be listened
-to. `session.json` preserves the reference, transcript variants, timing, signal
-levels, clipping fraction, DC offset, and word-error scores. Files are local,
-ignored by Git, and remain until deleted. Cancelled/incomplete streams are not
-retained. Tuning does not produce `device.transcript` events or execute phrases.
+WAVs and reference/transcript metadata are saved in
+`.tools/voice-tuning/session-*/`. Tuning samples stay local and do not produce
+voice-message events. This mode collects evaluation data; it does not train the
+model or change the live raw-audio path. `scripts/audio-benchmark.py` compares
+recognizers, while `audio-compare.py` and `audio-enhance.py` create offline filter
+comparisons. Their command-line help describes the inputs.
 
-Accepted samples are compared using original PCM, an 80 Hz high-pass filter
-(removes DC and low-frequency rumble), and the high-pass filter with quiet edge
-trimming (preserves 250 ms of context). Each processed WAV is also saved. These
-are candidates to measure, not assumptions about what improves the microphone.
-Reference phrases are never passed to the recognizer. Each new record identifies
-its recognizer; historical records without that field used Phonon. The score ignores punctuation and
-case but counts substitutions, insertions, and deletions. Only explicitly
-submitted takes count toward calibration. Retried and abandoned takes remain
-available as WAVs but are excluded from scores. Retry and Submit messages are
-retried until the device receives the resulting state; duplicates cannot accept
-a sample twice or advance twice.
-
-Every fourth distinct phrase is reserved for validation. A candidate is selected
-using practice phrases; applying it requires at least three distinct practice
-phrases and two distinct validation phrases, lower aggregate error on both, and
-no individual validation recording that is worse than the original. With the live Whisper worker, these are offline comparisons only: `apply` is
-rejected and normal voice input always uses raw PCM. Nothing is applied automatically. These small-sample checks are a starting point, not proof
-of general accuracy.
+## Operation and troubleshooting
 
 ```sh
-.tools/python/bin/python scripts/voice-tune.py reset  # Clear a historical filter profile
+.tools/python/bin/python scripts/bridge-service.py status
+.tools/python/bin/python scripts/bridge-service.py restart
+.tools/python/bin/python scripts/tunnel.py start
+.tools/python/bin/python scripts/tunnel.py status
+curl --fail http://127.0.0.1:8788/health
+curl --fail http://127.0.0.1:8788/audio
 ```
 
-Historical preprocessing profiles in `.tools/voice-tuning/profile.json` do not alter
-the live raw-audio path. Model weights are unchanged by tuning. The retained WAV/reference pairs provide a dataset for evaluating other filters,
-microphone settings, or a future trainable recognizer. Automatic word replacement
-is not enabled: changing valid words can conceal microphone or recognition errors.
+Bridge logs are `.tools/bridge.log` and `.tools/bridge-error.log`. Keep the bridge
+and tunnel running; use `tunnel.py start` to reconnect a saved configuration.
 
-The authenticated MCP server also exposes `list_voice_recordings` and
-`get_voice_recording(recording_id, variant?, format?)`. A recording ID looks like
-`session-012345abcdef:0001`. The default is a 32 kbps mono MP3 (`audio/mpeg`);
-`format: "wav"` returns the original PCM container. MP3 conversion uses FFmpeg
-from PATH or `/opt/homebrew/bin/ffmpeg`. Only retained tuning samples are readable;
-there is no arbitrary file-path tool. The tool returns MCP audio content without
-the reference phrase or recognition result, allowing a blind listening/transcription
-comparison. Retrieving audio through the cloud plugin transfers that selected
-sample to its caller; collection itself does not upload it.
+| Symptom | Check |
+| --- | --- |
+| Device not connected | USB data cable, 2.4 GHz Wi-Fi, hostname resolution, LAN access, and `/health`. If the host moved, use `device.py set-host`. |
+| Flash cannot find the board | Hold BOOT while resetting/powering on, release BOOT, then retry. Close other serial clients. |
+| Blank panel but valid screenshot | Panel startup or power; see [hardware notes](docs/hardware.md). A screenshot does not prove physical scanout. |
+| Screenshot cannot open USB | Stop the serial client, or use `/screenshot.png` on port 8788 if the bridge owns USB. |
+| Voice unavailable | Run `setup-audio.sh`, restart the bridge, and inspect `/audio` and the error log. |
+| Dot sees only `device.reply` | Refresh plugin tools and verify `device.transcript` is discovered before subscribing. |
+| Transcript exists but no reply | Check active subscriptions and webhook status with `get_device_status`. Retrieve text with `get_voice_input(recording_id)`. |
+| Dot says the transcript is missing | Text is in the event's `data.text`; ask it to use `get_voice_input` before recording again. |
 
-Rescan the plugin to discover these tools. Dot's ability to consume MCP audio
-content still needs an end-to-end test; tool discovery alone does not prove that
-it hears the audio. WAV files can also be played locally or attached manually.
+Subscriptions expire and need renewal. Webhook success means receipt, not that
+Dot has finished responding; cloud continuation can be slower than local
+recognition. Recover an existing request or transcript instead of replaying an
+accepted webhook. See [MCP Events](https://developers.openai.com/plugins/build/mcp-events)
+for the delivery model.
 
-```sh
-# Requires an empty queue; records a short microphone sample and exits tuning.
-.tools/python/bin/python scripts/tuning-smoke.py
-```
+## Network and stored data
 
-Hardware checks passed for sleeping at 20%, restoration to 80%, the 10-second
-idle transition, phrase display, main hold/release recording, tuning tap recording, short presses,
-the recording frame, WAV retention, review tap boundaries,
-Retry, Submit, and Exit. Device screenshots were compared with the three Figma
-reference frames. A quiet-room sample was correctly kept for inspection while
-skipping recognition. See the listening-comparison results below.
+| Default address | Purpose |
+| --- | --- |
+| LAN TCP 8787 | Authenticated device cards and replies |
+| LAN TCP 8790 | Authenticated microphone stream |
+| `127.0.0.1:8788` | Local administration and diagnostics |
+| `127.0.0.1:8789/mcp` | Bearer-authenticated MCP, used by the stdio adapter |
 
-### Microphone startup and listening comparisons
+Device TCP uses a pairing token but no TLS; use a trusted LAN. Keep the
+administrative API local. ChatGPT credentials are not stored on the device.
 
-The first four spoken tuning recordings had a repeatable startup impulse in the
-first 20 ms; three clipped at full scale there, with no rail clipping after
-100 ms. Subsequent checks also showed a decaying DC offset. Firmware drains fifteen
-20 ms codec blocks and applies a 5 ms fade-in before marking the tuning microphone
-ready. This adds 300 ms of settling time; stopping during
-that time cancels startup. The 30-second capture limit starts after settling.
-Input gain remains 30 dB because the later speech did not clip.
-
-For offline listening comparisons of recordings with this startup issue:
-
-```sh
-.tools/python/bin/python scripts/audio-compare.py <SESSION_DIRECTORY> --output <NEW_DIRECTORY>
-```
-
-This preserves originals and creates depopped, gently denoised, and denoised plus
-presence-EQ WAVs. The depop candidate removes 60 ms and fades in over 5 ms;
-denoising uses an 80 Hz high-pass and FFmpeg `afftdn` with 8 dB reduction and a
--55 dBFS noise floor; presence EQ adds 3 dB around 2.5 kHz. These are audition
-settings, not live defaults. `comparison.json` records exact filters and levels.
-On the initial four spoken samples, local Phonon recognition showed no consistent
-improvement. The enclosure's effect needs an exposed-microphone comparison;
-EQ cannot establish or repair missing acoustic detail.
-
-### Neural noise reduction and alternative recognition
-
-Offline comparisons can use [RNNoise models](https://github.com/GregorR/rnnoise-models)
-through FFmpeg and [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) through
-its native CLI. Install FFmpeg first; the pinned DeepFilterNet download currently
-supports Apple Silicon macOS. Downloads are checksum verified and stored in `.tools`.
-
-```sh
-.tools/python/bin/python scripts/setup-audio-eval.py
-.tools/python/bin/python scripts/audio-enhance.py <SESSION_DIRECTORY> --output <NEW_DIRECTORY>
-```
-
-The export creates `*-rnnoise.wav`, `*-deepfilter.wav`, and a manifest containing
-source hashes and processing times. Originals are checked for changes during export;
-the live preprocessing profile is untouched. Both outputs retain the original
-16 kHz mono PCM16 format and sample count. RNNoise uses the `bd` voice model,
-up to 12 dB temporary gain with peak headroom, and compensates its 10 ms delay.
-DeepFilterNet uses its embedded model and delay compensation. Both receive trailing
-silence to flush their final frames; padding is removed from the result.
-
-On twelve recorded tuning phrases, the lowest-energy intervals were around -55 dBFS.
-Compared at those same 32 ms intervals (the lowest-energy 20%), RNNoise reduced level by approximately 20 dB and
-DeepFilterNet by 39 dB. These are measurements of low-energy intervals, not a clean
-reference-based SNR estimate. Stronger suppression can remove speech detail: both
-neural candidates produced more recognition mistakes than the raw recordings.
-The enclosure remains a possible source of muffling; an exposed-microphone recording
-is needed to separate acoustic loss from electronics and background noise.
-
-[whisper.cpp](https://github.com/ggml-org/whisper.cpp) provides a second local ASR
-benchmark. The setup pins its source revision and verifies model checksums. On macOS,
-it requires CMake and GNU make (`gmake`) and uses Metal acceleration by default.
-The model download is separate from inference; recordings remain on this computer.
-
-```sh
-.tools/python/bin/python scripts/setup-whisper.py --model large-v3-turbo-q8_0
-.tools/python/bin/python scripts/audio-benchmark.py <SESSION_DIRECTORY>/session.json \
-    --model .tools/whisper-models/ggml-large-v3-turbo-q8_0.bin \
-    --enhanced <ENHANCED_DIRECTORY>/manifest.json --output <NEW_REPORT.json>
-```
-
-`--enhanced` is optional. `base.en` and `small.en` are also supported by the installer.
-The benchmark starts a temporary loopback-only server, warms the model, measures
-complete requests, and stops the server afterward. Expected phrases are used only
-for scoring; they are never sent to the recognizer. It compares accepted recordings
-with the raw results saved during tuning, recording the baseline model name.
-
-The October 2026 twelve-phrase experiment found:
-
-| Recognizer/input | Result compared with the spoken prompt | Median warm request |
-| --- | --- | --- |
-| Phonon/raw | Word mistakes in two phrases; also joined `for20` | Previous resident recognizer |
-| Whisper base.en/raw | More errors than Phonon | 32 ms |
-| Whisper small.en/raw | More errors than Phonon | 60 ms |
-| Whisper large-v3-turbo Q8/raw | All twelve match apart from punctuation/number formatting | 114 ms |
-| Whisper large-v3-turbo Q8/RNNoise | Word mistakes in two phrases | 115 ms |
-| Whisper large-v3-turbo Q8/DeepFilterNet | Word differences in three phrases | 117 ms |
-
-These timings exclude model loading, recording, device transport, and cloud delivery.
-The report deliberately retains the existing strict word scorer: it counts `20`
-versus `twenty`, `1/4 past 3` versus `quarter past three`, and `10:30` versus `ten thirty`
-as differences. Consequently its seven strict errors for raw Whisper turbo are all
-number formatting; that score alone would give the wrong ranking. Inspect transcripts
-alongside scores. Twelve familiar prompts are a small diagnostic set, not proof of
-accuracy on spontaneous speech or unfamiliar names. The bridge now uses raw Whisper turbo by default; running the offline benchmark
-does not change the bridge configuration.
-
-### Experimental transcript correction
-
-A small local LLM can be evaluated independently after recognition using
-[Ollama](https://docs.ollama.com/api/chat). Start Ollama locally and install its model:
-
-```sh
-ollama pull qwen3:4b
-.tools/python/bin/python scripts/transcript-correction.py <WHISPER_REPORT.json> \
-    --model qwen3:4b --output <NEW_CORRECTION_REPORT.json>
-```
-
-Only transcripts go to the local loopback endpoint. The fixed prompt asks for minimal
-repairs, treats transcript content as data, and instructs the model to preserve names,
-dates, numbers, and uncertain wording. No reference phrases are sent. The report
-retains originals, corrections, exact prompt, model digest, scores, and timings.
-Each sample gets a fresh conversation. Correction remains offline and opt-in.
-
-On the same twelve samples, Qwen3 4B Q4_K_M with thinking disabled fixed `yumps` and
-`for20`, but repaired a garbled reminder to `water the plant this morning` when the
-prompt said `water the plants tomorrow morning`. Strict errors fell from six to
-three, yet the invented date is consequential. Correcting Whisper turbo changed none
-of its twelve transcripts and added a median 160 ms (188 ms for Phonon transcripts).
-Raw Whisper turbo was therefore the strongest candidate in this comparison;
-automatic LLM correction is not enabled in the live voice path.
-
-
-Live Whisper integration checks passed for in-memory PCM preservation, an old filter
-profile being ignored, startup without blocking the bridge event loop, automatic
-recovery after a killed native worker, and authenticated audio streaming through an
-isolated bridge. The twelve retained accepted recordings were transcribed again
-through the resident worker. Tests publish no fixture transcripts to cloud Dot.
+Ignored `.tools/` contains pairing and MCP tokens, tunnel credentials, message
+history, transcripts, webhook signing keys, and any tuning recordings. Keep it
+out of Git and shared archives. Device Wi-Fi credentials live in NVS. Transcripts
+and tuning files remain until deleted. Retrieving a tuning recording through the
+cloud MCP audio tool transfers that selected sample to the caller.
