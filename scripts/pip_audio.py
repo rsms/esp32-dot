@@ -59,7 +59,7 @@ class Recording:
             'rms_p50': levels[len(levels) // 2], 'rms_p95': levels[int((len(levels) - 1) * .95)]}
 
     def accepted(self):
-        return len(self.pcm) >= RATE * 4 and self.voiced >= RATE // 5
+        return len(self.pcm) >= RATE * 2 and self.voiced >= RATE // 5
 
 
 class PhononWorker:

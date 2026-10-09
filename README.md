@@ -765,7 +765,8 @@ transcripts are saved locally but are not automatically delivered to Dot.
 
 To verify delivery, hold the sleeping or idle screen, wait for the listening
 state, say "Please send a message to my desk display confirming you received this voice test,"
-and release. Speak for more than two seconds at normal volume. Confirm that Dot
+and release. Speak for at least one second at normal volume after the microphone
+is ready. Confirm that Dot
 responds both in chat and on the device; a response only in chat does not verify
 the return path to the display. Recognition runs locally; only the resulting text and recording
 metadata are sent through the voice event, not the audio. Ordinary voice audio
@@ -904,11 +905,13 @@ recognition result cannot replace a newer screen or recording. The speaker is
 not used. Microphone samples are never printed to USB.
 
 The host buffers at most 30 seconds (960 KB) in memory. It discards cancelled
-recordings, recordings shorter than 2 seconds, and recordings without at least
+recordings, recordings shorter than 1 second, and recordings without at least
 200 ms above the level threshold. The gate ignores the initial 100 ms and
 removes per-block DC offset; its default RMS threshold is 0.0126 (about -38 dBFS).
 Use the bridge's `--audio-threshold` option for calibration. This is a simple
 energy gate, not a speech classifier; sustained background noise can pass it.
+The one-second minimum measures PCM received after codec settling, not the total
+time the screen is held. Explicitly cancelled recordings are still discarded.
 
 Accepted audio goes unchanged to a resident [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
 worker running **large-v3-turbo Q8**. There is no host denoising, edge trimming,

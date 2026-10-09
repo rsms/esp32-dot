@@ -16,7 +16,7 @@ def tone(amplitude=4000):
 
 class GateTests(unittest.TestCase):
     def test_short_quiet_dc_and_tap_are_discarded(self):
-        for blocks, packet in ((99, tone()), (150, bytes(640)),
+        for blocks, packet in ((49, tone()), (150, bytes(640)),
                                (150, struct.pack('<320h', *([8000] * 320)))):
             recording = Recording()
             for _ in range(blocks):
@@ -30,8 +30,12 @@ class GateTests(unittest.TestCase):
 
     def test_sustained_signal_and_limits(self):
         recording = Recording()
-        for _ in range(101):
+        for _ in range(49):
             recording.append(tone())
+        self.assertFalse(recording.accepted())  # 0.98 seconds
+        recording.append(tone())
+        self.assertTrue(recording.accepted())  # Exactly 1.00 second
+        recording.append(tone())
         self.assertTrue(recording.accepted())
         with self.assertRaises(ValueError):
             recording.append(b'\0\0')
@@ -97,10 +101,10 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.bridge.state['events'])
 
     async def test_gate_before_transcription_and_one_persisted_event(self):
-        self.assertEqual((await self.recording(blocks=99))['status'], 'discarded')
+        self.assertEqual((await self.recording(blocks=49))['status'], 'discarded')
         self.assertEqual((await self.recording(quiet=True))['status'], 'discarded')
         self.assertEqual(self.worker.calls, 0)
-        self.assertEqual((await self.recording())['status'], 'transcribed')
+        self.assertEqual((await self.recording(blocks=50))['status'], 'transcribed')
         self.assertEqual((await self.recording())['status'], 'transcribed')
         self.assertEqual(len(self.bridge.state['events']), 1)
         self.assertEqual(self.bridge.state['events'][0]['text'], 'A local test.')

@@ -56,7 +56,7 @@ def main():
             time.sleep(.3)
         assert current['state'] == 'sleeping' and current['brightness'] == 20, current
         # Main experience uses the same press/release path. Keep captures below
-        # two seconds so this check cannot publish a normal voice transcript.
+        # one second so this check cannot publish a normal voice transcript.
         for origin in ('sleeping', 'idle'):
             ui.api('/state', {'state': origin})
             ui.wait_state(stream, origin)
