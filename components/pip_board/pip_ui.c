@@ -29,6 +29,7 @@ static lv_timer_t *attention_timer;
 static lv_timer_t *idle_timer;
 static atomic_uint choice;
 static atomic_uint interaction;
+static atomic_uint audio_state;
 static char state[16] = "sleeping";
 static char content[664];
 static uint16_t offsets[168];
@@ -108,6 +109,8 @@ static void face(const char *name)
 {
     uint32_t color = !strcmp(name, "listening") ? 0xff472a : !strcmp(name, "attention") ? 0xffd900 : 0;
     clear(color);
+    unsigned audio = atomic_load(&audio_state);
+    atomic_store(&audio_state, !strcmp(name, "listening") ? ((audio & ~3u) + 4) | 1 : audio & ~3u);
     snprintf(state, sizeof(state), "%s", name);
     if (!strcmp(name, "idle")) {
         lv_timer_reset(idle_timer);
@@ -294,7 +297,9 @@ static void tap(int x, int y)
         face("listening");
         atomic_store(&interaction, 1);
     } else if (!strcmp(state, "listening")) {
-        face("idle");
+        unsigned audio = atomic_load(&audio_state);
+        face("thinking");
+        atomic_store(&audio_state, (audio & ~3u) | 2);
         atomic_store(&interaction, 2);
     }
 }
@@ -406,7 +411,8 @@ void pip_ui_inspect(void)
     printf("PIPEVENT {\"type\":\"ui\",\"state\":\"%s\",\"page\":%u,\"pages\":%u",
         state, page, pages);
     if (!strcmp(state, "sleeping")) pip_sleep_inspect();
-    printf("}\n");
+    printf(",\"audio\":{\"state\":%u,\"samples\":%u,\"peak\":%u}}\n",
+        atomic_load(&audio_state), (unsigned)pip_audio_samples(), (unsigned)pip_audio_peak());
     lvgl_port_unlock();
 }
 
@@ -414,5 +420,26 @@ void pip_ui_sleep_debug(uint32_t repeat, int32_t seek_ms)
 {
     if (!lvgl_port_lock(1000)) return;
     if (!strcmp(state, "sleeping")) pip_sleep_debug(repeat != 0, seek_ms);
+    lvgl_port_unlock();
+}
+
+uint32_t pip_ui_audio_state(void) { return atomic_load(&audio_state); }
+
+void pip_ui_audio_complete(uint32_t generation)
+{
+    if (!lvgl_port_lock(1000)) return;
+    unsigned audio = atomic_load(&audio_state);
+    if ((audio & ~3u) == generation && (audio & 3) != 0 &&
+        (!strcmp(state, "thinking") || !strcmp(state, "listening"))) face("idle");
+    lvgl_port_unlock();
+}
+
+void pip_ui_audio_finish(uint32_t generation)
+{
+    if (!lvgl_port_lock(1000)) return;
+    if (atomic_load(&audio_state) == (generation | 1) && !strcmp(state, "listening")) {
+        face("thinking");
+        atomic_store(&audio_state, generation | 2);
+    }
     lvgl_port_unlock();
 }

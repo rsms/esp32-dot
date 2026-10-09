@@ -1,3 +1,4 @@
+mod audio;
 mod network;
 
 use serde::{Deserialize, Serialize};
@@ -211,6 +212,11 @@ fn main() {
         .stack_size(12288)
         .spawn(move || network::run(from_network, to_network))
         .expect("network task");
+    thread::Builder::new()
+        .name("pip-audio".into())
+        .stack_size(12288)
+        .spawn(audio::run)
+        .expect("audio task");
     println!("pip: ready; USB cards and screenshots available");
     let mut app = App {
         card: None,

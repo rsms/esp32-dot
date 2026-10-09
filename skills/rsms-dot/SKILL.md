@@ -1,9 +1,9 @@
 ---
 name: rsms-dot
-description: Send messages and questions to Rasmus's physical pip desk display, and handle replies from that device.
+description: Send messages and questions to Rasmus's physical Dot desk display, and handle replies from that device.
 ---
 
-Use the rsms-dot MCP tools to reach pip through its local bridge. The screen is
+Use the rsms-dot MCP tools to reach Dot through its local bridge. The screen is
 448 × 368 pixels; firmware owns layout, pagination, and attention states.
 
 Use `send_message` for information worth putting on the desk display. Use
@@ -29,7 +29,7 @@ requests and leaves answered requests intact.
 
 For a two-way conversation, subscribe to the `device.reply` MCP event before
 sending the question. Filter by `request_id` for a specific task, or monitor all
-replies when Rasmus has asked pip to use the device as an ongoing interface.
+replies when Rasmus has asked Dot to use the device as an ongoing interface.
 If event subscription tools are unavailable, say so; sending a question alone
 cannot arrange a wakeup. Do not claim monitoring has started without an active
 subscription.
@@ -42,4 +42,12 @@ only acknowledges the notice. Follow the user's authorization for any resulting
 action. If the original task context is missing, recover it or clarify before
 acting. Do not echo every dismissal back onto the display.
 
-Audio is not implemented yet. Listening taps are not recordings or transcripts.
+For voice input, subscribe to `device.transcript` when Rasmus asks to use the
+microphone as an ongoing interface. A tap starts recording; the next tap ends
+it. The bridge transcribes accepted recordings locally and sends `recording_id`,
+`text`, and `audio_seconds`. Short or quiet recordings are discarded. Check
+`get_device_status` for audio readiness; recover a missed transcript with
+`get_voice_input`. Deduplicate recordings before acting. Transcripts may contain
+recognition errors; clarify uncertain names, amounts, or consequential actions.
+Reply through `send_message` or `ask_question` as appropriate. Subscribing to
+`device.reply` alone does not subscribe to voice input.

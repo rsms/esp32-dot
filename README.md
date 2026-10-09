@@ -31,7 +31,7 @@ esp32-dot was designed by rsms and built in collaboration with ChatGPT.
    synchronized content would come from the host.
 
 These are interaction directions. The implemented interface and integration
-status are described below; microphone audio remains future work.
+status, including local microphone transcription, are described below.
 
 ## Hardware and constraints
 
@@ -424,9 +424,10 @@ is elapsed time, `flush_us` is time in flush callbacks (including copies and
 rotation), `wait_us` is time waiting for a previous transfer, and `strips` and
 `pixels` describe the workload. It does not stream logging during rendering.
 
-Tapping sleeping/idle shows listening and emits a `listen_start` interaction;
-tapping again emits `listen_stop` and returns to idle. Microphone recording
-is not implemented yet.
+Tapping sleeping/idle starts microphone recording and shows listening; tapping
+again stops recording and shows thinking while the host gates/transcribes it.
+Short or quiet recordings return to idle without a transcript. See **Local
+voice input** below for setup and limits.
 
 Idle transitions to sleeping after 10 seconds without interaction.
 Entering idle starts a fresh timeout; touch activity resets it, and leaving
@@ -546,8 +547,10 @@ must deduplicate event IDs. Existing bridge answers remain queryable even if
 webhook delivery fails. Changing the MCP bearer credential revokes existing
 subscriptions after a bridge restart.
 
-Only acknowledged card replies generate MCP events. Listening taps remain
-best-effort device diagnostics; there is no microphone audio or transcript yet.
+Acknowledged card replies generate `device.reply`. Accepted microphone recordings
+generate `device.transcript` after local recognition. These are separate
+subscriptions; adding the new event requires rescanning an existing cloud plugin.
+`get_voice_input(recording_id)` recovers persisted text. Raw audio is not retained.
 
 ### Setup: device, local bridge, and ChatGPT Dot
 
@@ -591,7 +594,7 @@ current firmware is already installed.
 
 Install the bridge as a user launchd service. It runs independently of the
 terminal or chat and starts at login. Stop any manually started bridge first;
-only one process can own ports 8787, 8788, and 8789.
+only one process can own ports 8787, 8788, 8789, and 8790.
 
 ```sh
 .tools/python/bin/python scripts/bridge-service.py install
@@ -765,7 +768,8 @@ uv pip install --python .tools/mcp-test-python/bin/python mcp==2.3.0
 Host tests cover durable replies and webhook retries across restarts, filtering,
 verification failures, signing, credential rotation, idempotency, cancellation,
 priority ordering, HTTP authentication, and blocked callback destinations.
-All 18 host tests pass. The official SDK test passes modern and legacy
+All 24 host tests pass, including audio gates, streaming protocol, and transcript
+events. The official SDK test passes modern and legacy
 discovery, tools, and resources over both stdio and HTTP.
 The hardware test passed on the device after one transient USB inspection
 timeout. It sends requests through MCP/TCP, cancels a question, navigates
@@ -823,3 +827,81 @@ time. This benchmark measured 28.6 nonempty LVGL refreshes/second, about 5.8 ms
 median refresh work, and approximately 7.5 ms procedural rasterization per
 moving frame. This measures submitted refreshes, not panel-synchronized scanout;
 TE/vsync synchronization and full-screen animated transitions remain future work.
+
+## Local voice input
+
+The ES8311 microphone captures mono 16-bit PCM at 16 kHz, with 30 dB input gain.
+A dedicated task streams each 20 ms block immediately over a separate authenticated
+TCP connection on the device port plus three (8790 by default). The display and
+card/reply socket remain independent. The `.local` hostname is resolved while
+idle by the control connection and its address is reused for audio. Wi-Fi
+association without a DHCP lease is retried after 20 seconds.
+
+Tap the sleeping or idle face to start, then tap again to stop. Recording also
+stops after 30 seconds. An incoming card or host state change cancels it. A stale
+recognition result cannot replace a newer screen or recording. The speaker is
+not used. Microphone samples are never printed to USB.
+
+The host buffers at most 30 seconds (960 KB) in memory. It discards cancelled
+recordings, recordings shorter than 2 seconds, and recordings without at least
+200 ms above the level threshold. The gate ignores the initial 100 ms and
+removes per-block DC offset; its default RMS threshold is 0.0126 (about -38 dBFS).
+Use the bridge's `--audio-threshold` option for calibration. This is a simple
+energy gate, not a speech classifier; sustained background noise can pass it.
+
+Accepted audio goes to a resident native Swift worker using
+[Phonon-2 CoreML](https://github.com/fermionresearch/phonon-coreml), pinned at
+1.1.2. It requires Apple silicon, macOS 15+, and Swift 6. The model is downloaded
+into `.tools/Phonon-2-CoreML`; all encoder sizes are prepared before reporting
+ready. Initial CoreML preparation can take several minutes. After preparation,
+a supplied 10.435-second fixture transcribed in 26–37 ms on the development Mac.
+This excludes recording time, transport, and cloud Dot scheduling.
+
+Phonon's public API transcribes complete utterances. PCM streams during capture;
+recognition begins after the stop/level gate. The model stays loaded between
+utterances. No remote recognition service is required.
+
+```sh
+sh scripts/setup-audio.sh
+.tools/python/bin/python scripts/bridge-service.py restart
+curl --fail http://127.0.0.1:8788/audio
+.tools/python/bin/python scripts/phonon-bench.py
+# Records three seconds using the actual device microphone:
+.tools/python/bin/python scripts/audio-smoke.py
+```
+
+`/audio` reports readiness, capture status, signal levels, and timing without
+returning speech text. Accepted transcripts are persisted alongside bridge events.
+The worker uses a private temporary WAV and deletes it after transcription;
+short/quiet/cancelled recordings never reach the worker. Abrupt process or power
+loss can leave a temporary WAV in `.tools/audio`; startup removes matching leftovers older than two minutes.
+
+Rescan the `rsms-dot` plugin to discover `device.transcript` and `get_voice_input`.
+Ask Dot to subscribe to `device.transcript` for ongoing voice input. Events use
+the same durable signed-webhook delivery as replies; consumers should deduplicate
+`recording_id` and account for recognition errors. The local skill includes the
+voice workflow. End-to-end cloud voice delivery still requires that subscription;
+local fixture and microphone tests do not create it automatically. Cloud event delivery latency is separate from local ASR latency.
+
+The Phonon code is Apache-2.0. Model weights are by Fermion Research under
+[CC-BY-4.0](https://huggingface.co/FermionResearch/Phonon-2-CoreML); they are
+external downloads and are not included in this repository.
+
+
+Audio validation: the device streamed 12 seconds of microphone samples without
+blocking the UI, and quiet-room/very quiet speaker playback was discarded. The
+host's isolated PCM fixture test recognized the expected text about 90 ms after
+the final packet. A 7.46-second spoken test passed the level gate and transcribed
+in 89 ms. A second 5.2-second spoken test took 79 ms. Both included recognition
+errors, including the greeting and individual words, so speaking-distance
+accuracy is not yet sufficient. These local timings exclude cloud event delivery.
+`audio-smoke.py --play-file <SPEECH_WAV>` can exercise an acoustic fixture through
+the Mac output without changing system volume. Only use it when there is no live
+voice subscription that would forward test speech to a conversation.
+
+
+Hardware lifecycle checks also passed for incoming-message cancellation, rapid
+start/stop taps, and the automatic 30.0-second cap. After testing, the device is
+connected over TCP and the local model is ready; no recording is left active.
+The USB `network-stats` command reports DHCP state, association, RSSI, and free
+DMA memory without exposing provisioning credentials.

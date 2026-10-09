@@ -18,7 +18,7 @@ async def main():
         async with Client(server, mode=mode, read_timeout_seconds=15) as client:
             tools = await client.list_tools()
             assert {tool.name for tool in tools.tools} == {
-                'send_message', 'ask_question', 'get_request', 'get_device_status', 'cancel_request'}
+                'send_message', 'ask_question', 'get_request', 'get_device_status', 'cancel_request', 'get_voice_input'}
             result = await client.call_tool('get_device_status', {})
             assert not result.is_error, result
             assert result.structured_content['device'] == 'pip', result

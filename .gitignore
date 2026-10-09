@@ -8,3 +8,6 @@ sdkconfig.old
 sdkconfig.*.old
 __pycache__/
 /_*
+
+host/phonon/.build/
+host/phonon/.swiftpm/

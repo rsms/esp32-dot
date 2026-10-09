@@ -87,6 +87,23 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.receiver.messages), 2)  # verification + exactly one event
         self.assertEqual(bridge.get('q1')['status'], 'answered')
 
+    async def test_transcript_delivery_recovery_and_subscription_separation(self):
+        await self.mcp.subscribe(self.params)
+        await self.mcp.subscribe(dict(self.params, name='device.transcript'))
+        self.bridge.state['events'].append({'seq': 1, 'type': 'transcript',
+            'id': 'voice-test', 'text': 'What is next?', 'audio_seconds': 3.2, 'timestamp': time.time()})
+        self.bridge.save()
+        await self.mcp.deliver_once()
+        delivered = [m[0] for m in self.receiver.messages if 'eventId' in m[0]]
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(delivered[0]['name'], 'device.transcript')
+        self.assertEqual(delivered[0]['data']['recording_id'], 'voice-test')
+        result = await self.call('get_voice_input', {'recording_id': 'voice-test'})
+        self.assertEqual(result['structuredContent']['text'], 'What is next?')
+        await self.mcp.deliver_once()
+        self.assertEqual(len([m for m in self.receiver.messages if 'eventId' in m[0]]), 1)
+        self.assertTrue((await self.call('get_voice_input', {'recording_id': 'missing'}))['isError'])
+
     async def test_retry_keeps_event_id_across_restart(self):
         await self.mcp.subscribe(self.params)
         await self.question()

@@ -35,4 +35,16 @@ void pip_ui_inspect(void);
 
 void pip_ui_sleep_debug(uint32_t repeat, int32_t seek_ms);
 
+// Audio state packs a generation in the high bits and 0=cancel, 1=record,
+// 2=finish in the low bits. Results from older recordings cannot change the UI.
+uint32_t pip_ui_audio_state(void);
+void pip_ui_audio_complete(uint32_t generation);
+int32_t pip_audio_open(void);
+int32_t pip_audio_read(int16_t *samples, uint32_t count);
+void pip_audio_close(void);
+uint32_t pip_audio_samples(void);
+uint32_t pip_audio_peak(void);
+
+void pip_ui_audio_finish(uint32_t generation);
+
 void pip_network_inspect(void);

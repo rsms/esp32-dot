@@ -26,9 +26,10 @@ SERVER_META = "io.modelcontextprotocol/serverInfo"
 SKILL = ROOT / "skills/rsms-dot/SKILL.md"
 SKILL_URI = "skill://rsms-dot/rsms-dot/SKILL.md"
 INSTRUCTIONS = (
-    "Pip is Rasmus's desk display. Use a stable request_id for retries. "
+    "This is Dot's physical desk display. Use a stable request_id for retries. "
     "Queued does not mean read. Subscribe to device.reply before asking questions; "
     "get_request recovers answers. Dismissal acknowledges a notice, not approval. "
+    "Subscribe to device.transcript for voice input; get_voice_input recovers recognized text. "
     "Current display text is printable ASCII, at most 600 characters; options at most 64."
 )
 
@@ -78,6 +79,8 @@ TOOLS = [
             ["request_id", "text", "options"])),
     tool("get_request", "Read a request's text, pending/answered/cancelled status, and selected option. Use to recover a missed reply.",
         obj({"request_id": REQUEST_ID}, ["request_id"]), True),
+    tool("get_voice_input", "Recover a locally transcribed voice input by its recording ID. Speech recognition can be inaccurate; confirm consequential actions.",
+        obj({"recording_id": string(64)}, ["recording_id"]), True),
     tool("get_device_status", "Check device connectivity, queue, and reply subscription/delivery health.", obj({}), True),
     tool("cancel_request", "Cancel an obsolete pending request and remove it from the display. Answered requests retain their answer.",
         obj({"request_id": REQUEST_ID}, ["request_id"]), destructive=True),
@@ -86,7 +89,11 @@ REPLY_SCHEMA = obj({"request_id": REQUEST_ID, "kind": {"type": "string", "enum":
     "option_id": string(48), "option_label": string(64)}, ["request_id", "kind", "option_id", "option_label"])
 EVENTS = [{"name": "device.reply", "description": "Rasmus selected a decision option or dismissed a message on pip. Use request_id to recover its original context. A notice dismissal is not approval.",
     "delivery": ["webhook"], "inputSchema": obj({"request_id": string(64, "Optional filter for a single request. Omit to monitor all replies.")}),
-    "payloadSchema": REPLY_SCHEMA}]
+    "payloadSchema": REPLY_SCHEMA},
+    {"name": "device.transcript", "description": "A tap-to-record voice input transcribed locally with Phonon-2. Deduplicate by recording_id. Recognition can be inaccurate.",
+     "delivery": ["webhook"], "inputSchema": obj({}),
+     "payloadSchema": obj({"recording_id": string(64), "text": string(8192),
+         "audio_seconds": {"type": "number"}}, ["recording_id", "text", "audio_seconds"])}]
 
 
 def validate(value, schema, path="arguments"):
@@ -209,10 +216,11 @@ class MCP:
             signed_headers(subscription, payload, body)), 12)
 
     def subscription_identity(self, params):
-        if params.get("name") != "device.reply":
+        schema = next((e for e in EVENTS if e["name"] == params.get("name")), None)
+        if schema is None:
             raise ValueError("Unknown event")
         args = params.get("arguments", {})
-        validate(args, EVENTS[0]["inputSchema"])
+        validate(args, schema["inputSchema"])
         delivery = params.get("delivery", {})
         if not isinstance(delivery, dict) or delivery.get("mode") != "webhook":
             raise ValueError("Only webhook delivery is supported")
@@ -270,19 +278,24 @@ class MCP:
                     continue
                 subscription["last_seq"] = event["seq"]
                 changed = True
-                if event["type"] != "choice":
+                if subscription["name"] == "device.reply" and event["type"] == "choice":
+                    request_id = event["card_id"]
+                    if subscription["arguments"].get("request_id", request_id) != request_id:
+                        continue
+                    record = self.bridge.get(request_id)
+                    message = record["message"]
+                    option = next(o for o in message["options"] if o["id"] == event["option_id"])
+                    data = {"request_id": request_id, "kind": message["kind"],
+                        "option_id": option["id"], "option_label": option["label"]}
+                elif subscription["name"] == "device.transcript" and event["type"] == "transcript":
+                    request_id = event["id"]
+                    data = {"recording_id": request_id, "text": event["text"], "audio_seconds": event["audio_seconds"]}
+                else:
                     continue
-                request_id = event["card_id"]
-                if subscription["arguments"].get("request_id", request_id) != request_id:
-                    continue
-                record = self.bridge.get(request_id)
-                message = record["message"]
-                option = next(o for o in message["options"] if o["id"] == event["option_id"])
                 eid = "evt_" + hashlib.sha256(canonical([request_id, event["seq"], event["timestamp"]]).encode()).hexdigest()
                 self.state["outbox"].append({"subscription_id": subscription["id"], "attempts": 0,
-                    "next_attempt": 0, "status": "pending", "event": {"eventId": eid, "name": "device.reply",
-                        "timestamp": iso(event["timestamp"]), "cursor": None, "data": {"request_id": request_id,
-                            "kind": message["kind"], "option_id": option["id"], "option_label": option["label"]}}})
+                    "next_attempt": 0, "status": "pending", "event": {"eventId": eid, "name": subscription["name"],
+                        "timestamp": iso(event["timestamp"]), "cursor": None, "data": data}})
         if changed:
             self.bridge.save()
 
@@ -339,13 +352,22 @@ class MCP:
                 value = self.request_view(record)
             elif name == "get_request":
                 value = self.request_view(self.bridge.get(args["request_id"]))
+            elif name == "get_voice_input":
+                event = next((e for e in self.bridge.state["events"] if e["type"] == "transcript"
+                    and e["id"] == args["recording_id"]), None)
+                if event is None:
+                    raise ValueError("Unknown recording ID")
+                value = {"recording_id": event["id"], "text": event["text"],
+                    "audio_seconds": event["audio_seconds"], "created_at": iso(event["timestamp"])}
             elif name == "cancel_request":
                 value = self.request_view(await self.bridge.cancel(args["request_id"]))
             else:
                 counts = {key: sum(i["status"] == key for i in self.state["outbox"])
                     for key in ("pending", "delivered", "failed", "stopped")}
-                value = {**self.bridge.health(), "reply_subscriptions": sum(self.active(s) for s in self.state["subscriptions"].values()),
-                    "webhooks": counts, "audio_available": False}
+                value = {**self.bridge.health(), "reply_subscriptions": sum(self.active(s) and s["name"] == "device.reply" for s in self.state["subscriptions"].values()),
+                    "voice_subscriptions": sum(self.active(s) and s["name"] == "device.transcript" for s in self.state["subscriptions"].values()),
+                    "webhooks": counts, "audio_available": bool(self.bridge.audio and self.bridge.audio.worker.ready),
+                    "audio": self.bridge.audio.status() if self.bridge.audio else None}
             return {"content": [{"type": "text", "text": canonical(value)}], "structuredContent": value, "isError": False}
         except (ValueError, TypeError, KeyError):
             return {"content": [{"type": "text", "text": "Invalid request: check the tool schema, display limits, request ID, and duplicate content."}], "isError": True}

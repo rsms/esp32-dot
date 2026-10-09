@@ -2,11 +2,22 @@ use serde_json::{json, Value};
 use std::{
     ffi::{CStr, CString},
     io::{Read, Write},
-    net::{TcpStream, ToSocketAddrs},
-    sync::mpsc::{Receiver, SyncSender},
+    net::{SocketAddr, TcpStream, ToSocketAddrs},
+    sync::{
+        mpsc::{Receiver, SyncSender},
+        Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
+
+// Reuse the established control connection's resolved address for audio. This
+// also avoids competing mDNS queries from two tasks during startup.
+static SERVER_ADDRESS: Mutex<Option<SocketAddr>> = Mutex::new(None);
+
+pub fn server_address() -> Option<SocketAddr> {
+    *SERVER_ADDRESS.lock().unwrap()
+}
 
 fn copy_c(target: &mut [std::ffi::c_char], value: &str) -> Result<(), ()> {
     if value.len() >= target.len() || value.contains('\0') {
@@ -78,6 +89,7 @@ fn session(incoming: &SyncSender<String>, outgoing: &Receiver<String>) -> std::i
         .next()
         .ok_or(std::io::ErrorKind::AddrNotAvailable)?;
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(3))?;
+    *SERVER_ADDRESS.lock().unwrap() = Some(address);
     stream.set_read_timeout(Some(Duration::from_millis(250)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     stream.set_nodelay(true)?;
@@ -135,6 +147,7 @@ pub fn run(incoming: SyncSender<String>, outgoing: Receiver<String>) {
     loop {
         if unsafe { esp_idf_sys::pip_network_ready() } != 0 {
             let _ = session(&incoming, &outgoing);
+            *SERVER_ADDRESS.lock().unwrap() = None;
         }
         thread::sleep(Duration::from_secs(2));
     }

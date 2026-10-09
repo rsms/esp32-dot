@@ -60,6 +60,7 @@ class Bridge:
         self.token, self.state_path = token, state_path
         self.state = json.loads(state_path.read_text()) if state_path.exists() else {"cards": [], "events": []}
         self.peer = None
+        self.audio = None
 
     def save(self):
         private_json(self.state_path, self.state)
@@ -215,6 +216,8 @@ class Bridge:
                 result = await self.add(json.loads(data))
             elif method == "GET" and url.path == "/cards":
                 result = self.state["cards"]
+            elif method == "GET" and url.path == "/audio":
+                result = self.audio.status() if self.audio else {"ready": False}
             elif method == "GET" and url.path == "/events":
                 after = int(parse_qs(url.query).get("after", ["0"])[0])
                 result = [e for e in self.state["events"] if e["seq"] > after]
@@ -331,11 +334,14 @@ async def serve(args):
     bridge = Bridge(json.loads(config_path.read_text())["token"], ROOT / ".tools/bridge-state.json")
     from pip_mcp import MCP, load_mcp_token
     mcp = MCP(bridge, load_mcp_token())
+    from pip_audio import AudioService
+    bridge.audio = AudioService(bridge, threshold=args.audio_threshold)
+    audio = await asyncio.start_server(bridge.audio.client, args.bind, args.tcp_port + 3, limit=4096)
     tcp = await asyncio.start_server(bridge.tcp_client, args.bind, args.tcp_port, limit=MAX_MESSAGE)
     http = await asyncio.start_server(bridge.http_client, "127.0.0.1", args.http_port, limit=8192)
     rpc = await asyncio.start_server(mcp.http_client, "127.0.0.1", args.mcp_port, limit=16384)
     print(f"Pip API: http://127.0.0.1:{args.http_port}; MCP: http://127.0.0.1:{args.mcp_port}/mcp; device TCP: {args.bind}:{args.tcp_port}", flush=True)
-    tasks = [tcp.serve_forever(), http.serve_forever(), rpc.serve_forever(), mcp.deliver_events()]
+    tasks = [audio.serve_forever(), bridge.audio.worker.start(), tcp.serve_forever(), http.serve_forever(), rpc.serve_forever(), mcp.deliver_events()]
     if args.serial:
         from serial.tools import list_ports
         ports = [p.device for p in list_ports.comports() if p.vid == 0x303a and p.pid == 0x1001]
@@ -343,7 +349,7 @@ async def serve(args):
         if not port:
             raise ValueError("Expected one USB device; specify --serial /dev/cu.usbmodem…")
         tasks.append(UsbPeer(port).run(bridge))
-    async with tcp, http, rpc:
+    async with tcp, http, rpc, audio:
         await asyncio.gather(*tasks)
 
 
@@ -353,6 +359,7 @@ if __name__ == "__main__":
     parser.add_argument("--tcp-port", type=int, default=8787)
     parser.add_argument("--http-port", type=int, default=8788)
     parser.add_argument("--mcp-port", type=int, default=8789)
+    parser.add_argument("--audio-threshold", type=float, default=0.0126, help="Minimum 20ms microphone RMS (0–1), default -38dBFS")
     parser.add_argument("--serial", help="Optional USB transport: auto or a serial port")
     try:
         asyncio.run(serve(parser.parse_args()))
